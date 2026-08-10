@@ -1,0 +1,122 @@
+# Deploy lên domain SGF
+
+Có thể chạy bot và dashboard dưới subdomain, ví dụ `bot.sgf.vn`. Domain SGF chính chỉ cần gọi read API bằng server-to-server secret.
+
+## Option A: Docker Compose
+
+### `docker-compose.yml`
+
+```yaml
+services:
+  sgf-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+```
+
+```bash
+cp .env.example .env
+# sửa .env: PUBLIC_URL=https://bot.sgf.vn, NODE_ENV=production
+npm install
+# build image và chạy
+docker compose up -d --build
+```
+
+Đảm bảo `./data` nằm trên disk persistent. Không mount `.env` ra public.
+
+## Option B: Node + systemd
+
+```bash
+npm ci
+npm run build
+NODE_ENV=production node dist/index.js
+```
+
+Ví dụ systemd `/etc/systemd/system/sgf-bot.service`:
+
+```ini
+[Unit]
+Description=SGF Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sgf-discord-bot
+EnvironmentFile=/opt/sgf-discord-bot/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now sgf-bot
+sudo journalctl -u sgf-bot -f
+```
+
+## Nginx reverse proxy
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name bot.sgf.vn;
+
+    # certbot sẽ thêm ssl_certificate ở đây
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Sau đó cập nhật:
+
+```env
+PUBLIC_URL=https://bot.sgf.vn
+DISCORD_REDIRECT_URI=https://bot.sgf.vn/auth/discord/callback
+```
+
+Trong Discord Developer Portal, thêm đúng redirect URI HTTPS đó.
+
+## SePay production setup
+
+1. Mở Dashboard → tab **Tích hợp SGF** copy webhook URL.
+2. Vào SePay → Webhooks → tạo webhook mới.
+3. Chọn bank account dùng để nhận tiền.
+4. Chọn `In_only`, JSON request, API key auth.
+5. Paste API key vào `.env` rồi restart service.
+6. Dùng payment panel tạo một đơn nhỏ; chuyển đúng mã; kiểm tra log + role + ledger.
+
+Webhook endpoint phải public HTTPS và trả HTTP 2xx nhanh. Code đã chống transaction trùng và lưu unmatched transaction để debug.
+
+## Dùng domain SGF chính
+
+Backend của SGF gọi:
+
+```bash
+curl -H "X-SGF-Secret: $SGF_BOT_API_SECRET" \
+  "https://bot.sgf.vn/api/integrations/sgf/payments?guildId=1234567890&limit=100"
+```
+
+Không đưa `SGF_INTEGRATION_SECRET` vào JavaScript frontend. Nếu frontend cần dashboard riêng, SGF backend proxy dữ liệu hoặc tạo endpoint riêng có auth của SGF.
+
+## Database
+
+Starter dùng SQLite để cài nhanh. Khi chạy nhiều bot/server hoặc nhiều worker:
+
+- dùng một process bot chính để xử lý Discord gateway;
+- chuyển store sang PostgreSQL/Prisma hoặc Drizzle;
+- đặt job expiry entitlement và cleanup giao dịch unmatched;
+- encrypt OAuth refresh token at rest hoặc dùng secret store.
