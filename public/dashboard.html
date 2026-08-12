@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SGF Control Center</title>
+  <title>Study Voice Dashboard</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://cdnjs.cloudflare.com" />
   <link id="fontAwesomeCdn" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" onerror="this.onerror=null;this.href='/vendor/fontawesome/all.min.css';" />
@@ -15,9 +15,9 @@
   <div class="backdrop-shape shape-mint"></div>
 
   <header class="public-header" id="publicHeader">
-    <a class="brand" href="/" aria-label="SGF Control Center">
+    <a class="brand" href="/" aria-label="Study Voice Dashboard">
       <span class="brand-mark"><i class="fa-solid fa-wand-magic-sparkles"></i></span>
-      <span class="brand-copy"><strong>SGF</strong><small>CONTROL CENTER</small></span>
+      <span class="brand-copy"><strong>Study Voice</strong><small>DASHBOARD</small></span>
     </a>
     <div class="public-header-actions">
       <span id="connectionPill" class="status-pill status-neutral"><i class="fa-solid fa-circle-notch fa-spin"></i><span>Đang kiểm tra</span></span>
@@ -29,9 +29,9 @@
   <main class="public-main">
     <section id="landing" class="landing-view">
       <div class="landing-copy">
-        <span class="section-kicker"><i class="fa-solid fa-bolt"></i> DISCORD OPERATIONS</span>
-        <h1>Server của bạn.<br><span>Một nhịp vận hành.</span></h1>
-        <p>Phòng voice tự tạo, Premium, SePay và dữ liệu donor trong một không gian quản trị sáng rõ, nhanh và dễ dùng.</p>
+        <span class="section-kicker"><i class="fa-solid fa-bolt"></i> DISCORD STUDY VOICE</span>
+        <h1>SGNetwork<br><span>Quản lý kênh thoại</span></h1>
+        <p>Tùy chỉnh kênh thoại và không gian riêng cho bản thân bạn, thậm chí là cho tất cả mọi người. Liệu bạn đã sẵn sàng xây dựng mạng lưới gồm nhiều kênh thoại tại server discord SGNetwork?</p>
         <div class="landing-actions">
           <button id="heroLogin" class="button button-dark button-large"><i class="fa-brands fa-discord"></i><span>Tiếp tục với Discord</span><i class="fa-solid fa-arrow-up-right-from-square"></i></button>
         </div>
@@ -45,7 +45,7 @@
           <div class="art-bars"><i style="height:32%"></i><i style="height:53%"></i><i style="height:43%"></i><i style="height:74%"></i><i style="height:59%"></i><i style="height:88%"></i><i style="height:100%"></i><i style="height:76%"></i></div>
         </div>
         <div class="art-card art-card-mini mini-users"><span><i class="fa-solid fa-users"></i> NGƯỜI DÙNG</span><strong id="heroUserCount">0</strong><small><i class="fa-solid fa-circle-check"></i> Đang sử dụng bot</small></div>
-        <div class="art-card art-card-mini mini-server"><span class="server-dot"><i class="fa-brands fa-discord"></i></span><div><strong>SGF Community</strong><small><i class="fa-solid fa-circle-check"></i> Bot đã kết nối</small></div></div>
+        <div class="art-card art-card-mini mini-server"><span class="server-dot"><i class="fa-brands fa-discord"></i></span><div><strong>Study Voice</strong><small><i class="fa-solid fa-circle-check"></i> Bot đã kết nối</small></div></div>
         <div class="art-sticker"><i class="fa-solid fa-star"></i><span>MAKE IT<br>YOURS</span></div>
       </div>
     </section>
@@ -67,10 +67,11 @@
             <span class="nav-group-label nav-group-spaced admin-only-nav">SYSTEM</span>
             <button class="nav-item admin-only-nav" data-page="integration"><i class="fa-solid fa-plug"></i><span>Tích hợp SGF</span></button>
           </nav>
+          <div id="userChip" class="account-dock hidden"><span id="headerUserAvatar" class="header-user-avatar"><i class="fa-solid fa-user"></i></span><span class="header-user-copy"><small>Đang đăng nhập</small><strong id="headerUserName">Discord user</strong></span><button id="sidebarLogout" class="icon-button icon-button-danger" title="Đăng xuất" aria-label="Đăng xuất"><i class="fa-solid fa-arrow-right-from-bracket"></i></button></div>
         </aside>
 
         <section class="workspace">
-          <header class="workspace-header"><div class="workspace-breadcrumb"><span>SGF CONTROL CENTER</span><i class="fa-solid fa-chevron-right"></i><strong id="breadcrumbPage">Chọn server</strong></div><div class="workspace-header-actions"><button id="postPanelButton" class="button button-coral admin-only-control hidden"><i class="fa-solid fa-paper-plane"></i><span>Đăng payment panel</span></button><button id="changeServerButton" class="button button-light"><i class="fa-solid fa-server"></i><span>Đổi server</span></button></div></header>
+          <header class="workspace-header"><div class="workspace-breadcrumb"><span>Study Voice Dashboard</span><i class="fa-solid fa-chevron-right"></i><strong id="breadcrumbPage">Chọn server</strong></div><div class="workspace-header-actions"><button id="postPanelButton" class="button button-coral admin-only-control hidden"><i class="fa-solid fa-paper-plane"></i><span>Đăng payment panel</span></button><button id="changeServerButton" class="button button-light"><i class="fa-solid fa-server"></i><span>Đổi server</span></button></div></header>
 
           <div id="serverPickerView" class="server-picker-view">
             <div class="picker-intro"><div><span class="section-kicker"><i class="fa-solid fa-layer-group"></i> YOUR SERVERS</span><h2>Chọn server để bắt đầu.</h2><p>Server sẽ xuất hiện khi SGF Bot có quyền Administrator. Thành viên mở cửa hàng, admin mở toàn bộ Control Center.</p></div></div>
@@ -130,7 +131,6 @@
           </div>
         </section>
       </div>
-      <div id="userChip" class="account-dock hidden"><span id="headerUserAvatar" class="header-user-avatar"><i class="fa-solid fa-user"></i></span><span class="header-user-copy"><small>Đang đăng nhập</small><strong id="headerUserName">Discord user</strong></span><button id="sidebarLogout" class="icon-button icon-button-danger" title="Đăng xuất" aria-label="Đăng xuất"><i class="fa-solid fa-arrow-right-from-bracket"></i></button></div>
     </section>
   </main>
   <div id="roomPasswordDialog" class="web-modal hidden" role="dialog" aria-modal="true" aria-labelledby="roomPasswordDialogTitle"><form id="roomPasswordForm" class="surface-card web-modal-card"><div class="card-heading"><div><span class="section-kicker"><i class="fa-solid fa-key"></i> ROOM SECURITY</span><h3 id="roomPasswordDialogTitle">Đặt mật khẩu phòng</h3><p>Nhập mật khẩu mới hoặc để trống để tắt.</p></div><button id="cancelRoomPassword" type="button" class="icon-button icon-button-muted" aria-label="Đóng"><i class="fa-solid fa-xmark"></i></button></div><label class="field-label">Mật khẩu<input id="roomPasswordValue" type="password" maxlength="64" autocomplete="new-password" placeholder="Tối đa 64 ký tự" /></label><button type="submit" class="button button-dark button-full"><i class="fa-solid fa-shield-halved"></i><span>Lưu mật khẩu</span></button></form></div>

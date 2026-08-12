@@ -304,7 +304,7 @@ export class SgfBot {
   private async sendHelp(interaction: ChatInputCommandInteraction): Promise<void> {
     const embed = new EmbedBuilder()
       .setColor(0x5865f2)
-      .setAuthor({ name: 'SGF Control Center', iconURL: this.client.user?.displayAvatarURL() })
+      .setAuthor({ name: 'Study Voice Dashboard', iconURL: this.client.user?.displayAvatarURL() })
       .setTitle('Hướng dẫn sử dụng SGF Bot')
       .setDescription('Tất cả slash command được gom dưới command `/sgf`.')
       .addFields(
