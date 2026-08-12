@@ -24,8 +24,9 @@ import {
   type VoiceState,
 } from 'discord.js';
 import { config } from './config.js';
+import { cache } from './cache.js';
 import { store } from './db.js';
-import type { CreatorChannelConfig, GuildSettings, Room } from './types.js';
+import type { CreatorChannelConfig, GuildSettings, Product, Room } from './types.js';
 import type { PaymentCreationResult } from './services/payment-service.js';
 import { formatVnd } from './utils.js';
 import { createDonationPayment, createProductPayment, settleSepayWebhook } from './services/payment-service.js';
@@ -161,8 +162,8 @@ export class SgfBot {
       await guild.members.fetchMe().catch((error) => console.warn(`[bot] cannot fetch own member in ${guild.id}`, error));
       await this.registerSlashCommands(guild);
     });
-    this.client.on(Events.GuildMemberAdd, (member) => this.guildMemberSnapshots.delete(member.guild.id));
-    this.client.on(Events.GuildMemberRemove, (member) => this.guildMemberSnapshots.delete(member.guild.id));
+    this.client.on(Events.GuildMemberAdd, (member) => { this.guildMemberSnapshots.delete(member.guild.id); void cache.del(`guild-members:${member.guild.id}`); });
+    this.client.on(Events.GuildMemberRemove, (member) => { this.guildMemberSnapshots.delete(member.guild.id); void cache.del(`guild-members:${member.guild.id}`); });
     this.client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
       await this.onVoiceStateUpdate(oldState, newState).catch((error) => console.error('[bot] voice state error', error));
     });
@@ -177,7 +178,7 @@ export class SgfBot {
       }
     });
     this.client.on(Events.ChannelDelete, (channel) => {
-      store.deleteRoomByChannel(channel.id);
+      void store.deleteRoomByChannel(channel.id);
     });
   }
 
@@ -238,16 +239,16 @@ export class SgfBot {
       return;
     }
 
-    const settings = store.getSettings(interaction.guild.id, interaction.guild.name);
+    const settings = await store.getSettings(interaction.guild.id, interaction.guild.name);
     if (subcommand === 'help') return this.sendHelp(interaction);
     if (subcommand === 'donate') {
       await interaction.showModal(this.donationModal());
       return;
     }
     if (subcommand === 'premium') {
-      const products = store.listProducts(interaction.guild.id, true);
+      const products = await store.listProducts(interaction.guild.id, true);
       const row = this.paymentButtonRow(products);
-      const entitlement = store.getEntitlement(interaction.guild.id, interaction.user.id);
+      const entitlement = await store.getEntitlement(interaction.guild.id, interaction.user.id);
       const embed = new EmbedBuilder()
         .setColor(0x5865f2)
         .setAuthor({ name: interaction.guild.name, iconURL: interaction.guild.iconURL() || undefined })
@@ -264,8 +265,8 @@ export class SgfBot {
     }
     if (subcommand === 'room') {
       const currentChannelId = interaction.member instanceof GuildMember ? interaction.member.voice.channelId : '';
-      const currentRoom = currentChannelId ? store.getRoomByChannel(currentChannelId) : undefined;
-      const room = currentRoom?.ownerId === interaction.user.id ? currentRoom : store.getRoomByOwner(interaction.guild.id, interaction.user.id);
+      const currentRoom = currentChannelId ? await store.getRoomByChannel(currentChannelId) : undefined;
+      const room = currentRoom?.ownerId === interaction.user.id ? currentRoom : await store.getRoomByOwner(interaction.guild.id, interaction.user.id);
       if (!room) {
         await interaction.reply({ content: 'Bạn chưa host phòng tạm nào. Hãy vào creator voice channel trước.', ephemeral: true });
         return;
@@ -285,7 +286,7 @@ export class SgfBot {
       return;
     }
     if (subcommand === 'status') {
-      const stats = store.getStats(interaction.guild.id);
+      const stats = await store.getStats(interaction.guild.id);
       const embed = new EmbedBuilder()
         .setColor(this.client.isReady() ? 0x22c55e : 0xef4444)
         .setTitle('Trạng thái SGF Bot')
@@ -349,7 +350,7 @@ export class SgfBot {
         ? currentSettings.creatorChannels.map((item) => item.channelId === creator.channelId ? creator : item)
         : [...currentSettings.creatorChannels, creator];
     }
-    const settings = Object.keys(patch).length ? store.updateSettings(interaction.guild!.id, patch) : currentSettings;
+    const settings = Object.keys(patch).length ? await store.updateSettings(interaction.guild!.id, patch) : currentSettings;
     const missing = [!settings.paymentPanelChannelId ? 'kênh payment panel' : '', settings.creatorChannels.length === 0 ? 'creator voice channel' : ''].filter(Boolean);
     const complete = missing.length === 0;
     const embed = new EmbedBuilder()
@@ -378,12 +379,12 @@ export class SgfBot {
     const guild = newState.guild;
 
     if (newState.channelId) {
-      const settings = store.getSettings(guild.id, guild.name);
+      const settings = await store.getSettings(guild.id, guild.name);
       const creator = settings.creatorChannels.find((item) => item.channelId === newState.channelId);
       if (creator) {
         await this.createRoomFromTrigger(member, creator, settings, oldState.channelId);
       } else {
-        const joinedRoom = store.getRoomByChannel(newState.channelId);
+        const joinedRoom = await store.getRoomByChannel(newState.channelId);
         if (joinedRoom) {
           const allowed = await this.enforceRoomPassword(member, joinedRoom);
           if (allowed && joinedRoom.notifyJoinLeave) await this.sendRoomNotice(joinedRoom, `➡️ <@${member.id}> đã **vào phòng**.`);
@@ -392,7 +393,7 @@ export class SgfBot {
     }
 
     if (oldState.channelId) {
-      const leftRoom = store.getRoomByChannel(oldState.channelId);
+      const leftRoom = await store.getRoomByChannel(oldState.channelId);
       if (leftRoom) {
         const rejectedKey = `${leftRoom.channelId}:${member.id}`;
         const rejected = this.rejectedPasswordLeaves.delete(rejectedKey);
@@ -406,6 +407,8 @@ export class SgfBot {
   private async createRoomFromTrigger(member: GuildMember, creator: CreatorChannelConfig, settings: GuildSettings, previousChannelId: string | null): Promise<void> {
     const key = `${member.guild.id}:${member.id}`;
     if (this.creatingOwners.has(key)) return;
+    const distributedLockKey = `room-create:${key}`;
+    if (cache.backend !== 'memory' && !await cache.setIfAbsent(distributedLockKey, '1', 20)) return;
     this.creatingOwners.add(key);
     try {
       if (creator.allowedRoleId && !member.roles.cache.has(creator.allowedRoleId) && !member.permissions.has(PermissionFlagsBits.Administrator)) {
@@ -415,24 +418,25 @@ export class SgfBot {
         return;
       }
 
-      const premium = this.isPremium(member, settings);
+      const premium = await this.isPremium(member, settings);
       if (creator.mode === 'basic') {
-        const existing = store.getRoomByOwnerAndCreator(member.guild.id, member.id, creator.channelId);
+        const existing = await store.getRoomByOwnerAndCreator(member.guild.id, member.id, creator.channelId);
         const existingChannel = existing ? member.guild.channels.cache.get(existing.channelId) : undefined;
         if (existing && existingChannel?.isVoiceBased()) {
           await member.voice.setChannel(existingChannel, 'Dùng lại phòng cơ bản đang có').catch(() => undefined);
           return;
         }
-        if (existing) store.deleteRoomByChannel(existing.channelId);
+        if (existing) await store.deleteRoomByChannel(existing.channelId);
       }
 
       if (creator.mode === 'editable' && !premium) {
-        const editableRooms = store.listRoomsByOwner(member.guild.id, member.id).filter((room) => room.mode === 'editable');
-        const activeRooms = editableRooms.filter((room) => {
-          const channel = member.guild.channels.cache.get(room.channelId);
-          if (!channel?.isVoiceBased()) store.deleteRoomByChannel(room.channelId);
-          return Boolean(channel?.isVoiceBased());
-        });
+        const editableRooms = (await store.listRoomsByOwner(member.guild.id, member.id)).filter((room) => room.mode === 'editable');
+        const activeRooms: Room[] = [];
+        for (const room of editableRooms) {
+          const roomChannel = member.guild.channels.cache.get(room.channelId);
+          if (roomChannel?.isVoiceBased()) activeRooms.push(room);
+          else await store.deleteRoomByChannel(room.channelId);
+        }
         if (activeRooms.length) {
           const first = activeRooms[0];
           const firstChannel = member.guild.channels.cache.get(first.channelId);
@@ -456,7 +460,7 @@ export class SgfBot {
         reason: `SGF temporary ${creator.mode} room for ${member.user.tag}`,
       });
 
-      const room = store.insertRoom({
+      const room = await store.insertRoom({
         guildId: member.guild.id,
         channelId: channel.id,
         ownerId: member.id,
@@ -474,12 +478,12 @@ export class SgfBot {
       } catch (error) {
         console.warn(`[bot] cannot send room panel in voice chat ${channel.id}`, error);
       }
-      store.updateRoom(channel.id, { controlMessageId });
+      await store.updateRoom(channel.id, { controlMessageId });
       try {
         await member.voice.setChannel(channel, 'SGF tạo phòng tạm và chuyển host');
       } catch (error) {
         await channel.delete('Không move được chủ phòng').catch(() => undefined);
-        store.deleteRoomByChannel(channel.id);
+        await store.deleteRoomByChannel(channel.id);
         throw new Error('Bot tạo được phòng nhưng không chuyển được member. Kiểm tra quyền Move Members và Connect.', { cause: error });
       }
     } catch (error) {
@@ -491,11 +495,12 @@ export class SgfBot {
       }
     } finally {
       this.creatingOwners.delete(key);
+      if (cache.backend !== 'memory') await cache.del(distributedLockKey);
     }
   }
 
   private async enforceRoomPassword(member: GuildMember, room: Room): Promise<boolean> {
-    if (!room.passwordHash || member.id === room.ownerId || member.permissions.has(PermissionFlagsBits.Administrator) || store.hasRoomAccess(room.id, member.id)) return true;
+    if (!room.passwordHash || member.id === room.ownerId || member.permissions.has(PermissionFlagsBits.Administrator) || await store.hasRoomAccess(room.id, member.id)) return true;
     this.rejectedPasswordLeaves.add(`${room.channelId}:${member.id}`);
     await member.voice.disconnect('Phòng voice yêu cầu mật khẩu').catch(() => undefined);
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`roompass:enter:${room.channelId}`).setLabel('Nhập mật khẩu').setStyle(ButtonStyle.Primary));
@@ -513,11 +518,11 @@ export class SgfBot {
   }
 
   private async sendExpiryReminders(): Promise<void> {
-    for (const entitlement of store.listEntitlementsNeedingReminder(3)) {
+    for (const entitlement of await store.listEntitlementsNeedingReminder(3)) {
       const guild = this.client.guilds.cache.get(entitlement.guildId);
       const user = await this.client.users.fetch(entitlement.discordUserId).catch(() => null);
       if (user) {
-        const product = store.getProduct(entitlement.productId);
+        const product = await store.getProduct(entitlement.productId);
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setLabel('Gia hạn Premium').setStyle(ButtonStyle.Link).setURL(config.publicUrl));
         await user.send({
           embeds: [new EmbedBuilder()
@@ -528,33 +533,34 @@ export class SgfBot {
           components: [row],
         }).catch(() => undefined);
       }
-      store.markEntitlementReminder(entitlement.id);
+      await store.markEntitlementReminder(entitlement.id);
     }
   }
 
   private async expireDueEntitlements(): Promise<void> {
-    const due = store.expireDueEntitlements();
+    const due = await store.expireDueEntitlements();
     const downgraded = new Set<string>();
     for (const entitlement of due) {
       const guild = this.client.guilds.cache.get(entitlement.guildId);
       if (!guild) continue;
       const member = await guild.members.fetch(entitlement.discordUserId).catch(() => null);
-      if (member && entitlement.roleId && !store.hasActiveEntitlementForRole(entitlement.guildId, entitlement.discordUserId, entitlement.roleId)) {
+      if (member && entitlement.roleId && !await store.hasActiveEntitlementForRole(entitlement.guildId, entitlement.discordUserId, entitlement.roleId)) {
         await member.roles.remove(entitlement.roleId, 'SGF Premium entitlement expired').catch(() => undefined);
       }
       const key = `${entitlement.guildId}:${entitlement.discordUserId}`;
-      if (downgraded.has(key) || store.hasActiveEntitlement(entitlement.guildId, entitlement.discordUserId)) continue;
+      if (downgraded.has(key) || await store.hasActiveEntitlement(entitlement.guildId, entitlement.discordUserId)) continue;
       downgraded.add(key);
-      const editableRooms = store.listRoomsByOwner(entitlement.guildId, entitlement.discordUserId).filter((room) => room.mode === 'editable');
-      const activeEditableRooms = editableRooms.filter((room) => {
-        const channel = guild.channels.cache.get(room.channelId);
-        if (!channel?.isVoiceBased()) store.deleteRoomByChannel(room.channelId);
-        return Boolean(channel?.isVoiceBased());
-      });
+      const editableRooms = (await store.listRoomsByOwner(entitlement.guildId, entitlement.discordUserId)).filter((room) => room.mode === 'editable');
+      const activeEditableRooms: Room[] = [];
+      for (const room of editableRooms) {
+        const roomChannel = guild.channels.cache.get(room.channelId);
+        if (roomChannel?.isVoiceBased()) activeEditableRooms.push(room);
+        else await store.deleteRoomByChannel(room.channelId);
+      }
       const removed: string[] = [];
       for (const room of activeEditableRooms.slice(1)) {
         const channel = guild.channels.cache.get(room.channelId);
-        store.deleteRoomByChannel(room.channelId);
+        await store.deleteRoomByChannel(room.channelId);
         if (channel?.isVoiceBased()) await channel.delete('Premium hết hạn: giữ phòng editable đầu tiên').catch(() => undefined);
         removed.push(room.channelId);
       }
@@ -564,22 +570,29 @@ export class SgfBot {
     }
   }
 
-  private isPremium(member: GuildMember, _settings: GuildSettings): boolean {
+  private async isPremium(member: GuildMember, _settings: GuildSettings): Promise<boolean> {
     return store.hasActiveEntitlement(member.guild.id, member.id);
   }
 
-  private canReceiveOwnership(room: Room, member: GuildMember): boolean {
-    if (room.mode !== 'editable' || store.hasActiveEntitlement(member.guild.id, member.id)) return true;
-    return !store.listRoomsByOwner(member.guild.id, member.id).some((ownedRoom) => ownedRoom.mode === 'editable' && ownedRoom.channelId !== room.channelId && member.guild.channels.cache.get(ownedRoom.channelId)?.isVoiceBased());
+  private async canReceiveOwnership(room: Room, member: GuildMember): Promise<boolean> {
+    if (room.mode !== 'editable' || await store.hasActiveEntitlement(member.guild.id, member.id)) return true;
+    const ownedRooms = await store.listRoomsByOwner(member.guild.id, member.id);
+    return !ownedRooms.some((ownedRoom) => ownedRoom.mode === 'editable' && ownedRoom.channelId !== room.channelId && member.guild.channels.cache.get(ownedRoom.channelId)?.isVoiceBased());
   }
 
   private async autoTransferOwnership(room: Room): Promise<void> {
     const guild = this.client.guilds.cache.get(room.guildId);
     const channel = guild?.channels.cache.get(room.channelId);
     if (!guild || !channel?.isVoiceBased()) return;
-    const creator = store.getSettings(room.guildId).creatorChannels.find((item) => item.channelId === room.creatorChannelId);
+    const creator = (await store.getSettings(room.guildId)).creatorChannels.find((item) => item.channelId === room.creatorChannelId);
     if (creator?.autoTransferOwner === false) return;
-    const nextHost = [...channel.members.values()].find((member) => !member.user.bot && member.id !== room.ownerId && this.canReceiveOwnership(room, member));
+    let nextHost: GuildMember | undefined;
+    for (const candidate of channel.members.values()) {
+      if (!candidate.user.bot && candidate.id !== room.ownerId && await this.canReceiveOwnership(room, candidate)) {
+        nextHost = candidate;
+        break;
+      }
+    }
     if (nextHost) await this.transferOwnership(room, nextHost, 'Host cũ rời phòng');
     else if (channel.members.size > 0) await this.sendRoomNotice(room, '⚠️ Chưa thể tự chuyển host vì các member còn lại đã đạt giới hạn phòng editable của gói Free.');
   }
@@ -587,22 +600,22 @@ export class SgfBot {
   private async transferOwnership(room: Room, nextHost: GuildMember, reason: string): Promise<Room> {
     const channel = nextHost.guild.channels.cache.get(room.channelId);
     if (!channel?.isVoiceBased()) throw new Error('Phòng không còn tồn tại.');
-    if (!this.canReceiveOwnership(room, nextHost)) throw new Error('Member này đã có 1 phòng editable theo giới hạn Free. Hãy chọn member Premium hoặc đóng phòng cũ trước.');
+    if (!await this.canReceiveOwnership(room, nextHost)) throw new Error('Member này đã có 1 phòng editable theo giới hạn Free. Hãy chọn member Premium hoặc đóng phòng cũ trước.');
     const oldOwnerId = room.ownerId;
     await channel.permissionOverwrites.edit(oldOwnerId, { ViewChannel: null, Connect: null, Speak: null }).catch(() => undefined);
     await channel.permissionOverwrites.edit(nextHost.id, { ViewChannel: true, Connect: true, Speak: true });
-    const updated = store.updateRoom(room.channelId, { ownerId: nextHost.id, ownerTag: nextHost.user.tag })!;
+    const updated = (await store.updateRoom(room.channelId, { ownerId: nextHost.id, ownerTag: nextHost.user.tag }))!;
     await this.sendRoomNotice(updated, `👑 <@${nextHost.id}> đã trở thành **host mới**. ${reason}`);
     await this.refreshRoomPanel(updated);
     return updated;
   }
 
   private async removeRoomIfEmpty(channelId: string): Promise<void> {
-    const room = store.getRoomByChannel(channelId);
+    const room = await store.getRoomByChannel(channelId);
     if (!room) return;
     const channel = this.client.channels.cache.get(channelId);
     if (!channel || !channel.isVoiceBased() || channelIsEmpty(channel)) {
-      store.deleteRoomByChannel(channelId);
+      await store.deleteRoomByChannel(channelId);
       if (channel?.isVoiceBased()) await channel.delete('Phòng tạm đã trống').catch(() => undefined);
     }
   }
@@ -658,7 +671,7 @@ export class SgfBot {
     if (channel?.isVoiceBased() && channel.isTextBased()) await channel.send({ content, allowedMentions: { users: [] } }).catch(() => undefined);
   }
 
-  private paymentButtonRow(products: ReturnType<typeof store.listProducts>): ActionRowBuilder<ButtonBuilder> | undefined {
+  private paymentButtonRow(products: Product[]): ActionRowBuilder<ButtonBuilder> | undefined {
     if (!products.length) return new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId('pay:donate:x').setLabel('Donate').setStyle(ButtonStyle.Success));
     const row = new ActionRowBuilder<ButtonBuilder>();
     for (const product of products.slice(0, 4)) row.addComponents(new ButtonBuilder().setCustomId(`pay:buy:${product.id}`).setLabel(`${product.name} - ${formatVnd(product.priceVnd)}`).setStyle(ButtonStyle.Primary));
@@ -670,7 +683,7 @@ export class SgfBot {
     const [namespace, action, value] = interaction.customId.split(':');
     if (namespace === 'room') return this.onRoomButton(interaction, action, value);
     if (namespace === 'roompass' && action === 'enter') {
-      const room = store.getRoomByChannel(value);
+      const room = await store.getRoomByChannel(value);
       if (!room) {
         await interaction.reply({ content: 'Phòng không còn tồn tại.' });
         return;
@@ -684,7 +697,7 @@ export class SgfBot {
   }
 
   private async onRoomButton(interaction: ButtonInteraction, action: string, channelId: string): Promise<void> {
-    const room = store.getRoomByChannel(channelId);
+    const room = await store.getRoomByChannel(channelId);
     if (!room || !interaction.guild) {
       await interaction.reply({ content: 'Phòng này không còn tồn tại.', ephemeral: Boolean(interaction.guild) });
       return;
@@ -699,7 +712,7 @@ export class SgfBot {
     }
     const channel = interaction.guild.channels.cache.get(channelId);
     if (!channel?.isVoiceBased()) {
-      store.deleteRoomByChannel(channelId);
+      await store.deleteRoomByChannel(channelId);
       await interaction.reply({ content: 'Kênh đã bị xóa.', ephemeral: true });
       return;
     }
@@ -738,13 +751,13 @@ export class SgfBot {
       return;
     }
     if (action === 'notify') {
-      const updated = store.updateRoom(channelId, { notifyJoinLeave: !room.notifyJoinLeave })!;
+      const updated = (await store.updateRoom(channelId, { notifyJoinLeave: !room.notifyJoinLeave }))!;
       await this.refreshRoomPanel(updated);
       await interaction.reply({ content: `🔔 Thông báo người ra/vào đã **${updated.notifyJoinLeave ? 'bật' : 'tắt'}**.`, ephemeral: true });
       return;
     }
     if (action === 'delete') {
-      store.deleteRoomByChannel(channelId);
+      await store.deleteRoomByChannel(channelId);
       await channel.delete('Host/admin xóa phòng tạm').catch(() => undefined);
       await interaction.reply({ content: '🗑️ Đã xóa phòng.', ephemeral: true });
     }
@@ -753,7 +766,7 @@ export class SgfBot {
   private async onUserSelect(interaction: UserSelectMenuInteraction): Promise<void> {
     const [namespace, action, channelId] = interaction.customId.split(':');
     if (namespace !== 'roomuser' || !interaction.guild) return;
-    const room = store.getRoomByChannel(channelId);
+    const room = await store.getRoomByChannel(channelId);
     if (!room || (interaction.user.id !== room.ownerId && !isAdmin(interaction))) {
       await interaction.reply({ content: 'Bạn không còn quyền điều khiển phòng này.', ephemeral: true });
       return;
@@ -766,7 +779,7 @@ export class SgfBot {
       return;
     }
     if (action === 'invite') {
-      store.grantRoomAccess(room.id, target.id);
+      await store.grantRoomAccess(room.id, target.id);
       await channel.permissionOverwrites.edit(target.id, { ViewChannel: true, Connect: true });
       await interaction.reply({ content: `✅ Đã mời <@${target.id}> vào phòng.`, ephemeral: true });
       return;
@@ -780,7 +793,7 @@ export class SgfBot {
       return;
     }
     if (action === 'kick') {
-      store.revokeRoomAccess(room.id, target.id);
+      await store.revokeRoomAccess(room.id, target.id);
       await channel.permissionOverwrites.delete(target.id, 'Thu hồi quyền khi bị kick').catch(() => undefined);
       await target.voice.disconnect(`Bị kick khỏi phòng bởi ${interaction.user.tag}`);
       await interaction.reply({ content: `👢 Đã kick <@${target.id}> và thu hồi quyền mời/password.`, ephemeral: true });
@@ -800,27 +813,32 @@ export class SgfBot {
     const [namespace, action, channelId] = interaction.customId.split(':');
     if (namespace === 'payment') return this.onDonationModal(interaction);
     if (namespace === 'roompassmodal' && action === 'verify') {
-      const room = store.getRoomByChannel(channelId);
+      const room = await store.getRoomByChannel(channelId);
       const attemptKey = `${channelId}:${interaction.user.id}`;
-      const attempt = this.passwordAttempts.get(attemptKey);
-      if (attempt && attempt.resetAt > Date.now() && attempt.count >= 5) {
+      const redisAttemptKey = `password-attempt:${attemptKey}`;
+      const memoryAttempt = this.passwordAttempts.get(attemptKey);
+      const attemptCount = cache.backend === 'memory' ? memoryAttempt?.count || 0 : Number(await cache.get(redisAttemptKey) || 0);
+      if (attemptCount >= 5) {
         await interaction.reply({ content: '⏳ Bạn đã nhập sai quá nhiều lần. Hãy thử lại sau 5 phút.' });
         return;
       }
       const password = interaction.fields.getTextInputValue('password');
       if (!room || !passwordMatches(password, room)) {
-        const current = attempt && attempt.resetAt > Date.now() ? attempt : { count: 0, resetAt: Date.now() + 5 * 60_000 };
-        this.passwordAttempts.set(attemptKey, { ...current, count: current.count + 1 });
-        await interaction.reply({ content: `❌ Mật khẩu không đúng hoặc phòng đã bị xóa. Còn ${Math.max(0, 5 - current.count - 1)} lần thử trước khi tạm khóa.` });
+        const nextCount = cache.backend === 'memory'
+          ? attemptCount + 1
+          : await cache.increment(redisAttemptKey, 5 * 60);
+        if (cache.backend === 'memory') this.passwordAttempts.set(attemptKey, { count: nextCount, resetAt: Date.now() + 5 * 60_000 });
+        await interaction.reply({ content: `❌ Mật khẩu không đúng hoặc phòng đã bị xóa. Còn ${Math.max(0, 5 - nextCount)} lần thử trước khi tạm khóa.` });
         return;
       }
       this.passwordAttempts.delete(attemptKey);
-      store.grantRoomAccess(room.id, interaction.user.id);
+      if (cache.backend !== 'memory') await cache.del(redisAttemptKey);
+      await store.grantRoomAccess(room.id, interaction.user.id);
       await interaction.reply({ content: `✅ Đúng mật khẩu. Bạn có thể vào lại phòng <#${room.channelId}>.` });
       return;
     }
     if (namespace !== 'roommodal' || !interaction.guild) return;
-    const room = store.getRoomByChannel(channelId);
+    const room = await store.getRoomByChannel(channelId);
     const channel = interaction.guild.channels.cache.get(channelId);
     if (!room || !channel?.isVoiceBased()) {
       await interaction.reply({ content: 'Phòng không còn tồn tại.', ephemeral: true });
@@ -849,16 +867,12 @@ export class SgfBot {
     }
     if (action === 'password') {
       const password = interaction.fields.getTextInputValue('password').trim();
-      const updated = password
-        ? (() => {
-          const salt = crypto.randomBytes(16).toString('hex');
-          store.clearRoomAccess(room.id);
-          return store.updateRoom(channelId, { passwordSalt: salt, passwordHash: passwordDigest(password, salt) })!;
-        })()
-        : (() => {
-          store.clearRoomAccess(room.id);
-          return store.updateRoom(channelId, { passwordSalt: '', passwordHash: '' })!;
-        })();
+      await store.clearRoomAccess(room.id);
+      const salt = password ? crypto.randomBytes(16).toString('hex') : '';
+      const updated = (await store.updateRoom(channelId, {
+        passwordSalt: salt,
+        passwordHash: password ? passwordDigest(password, salt) : '',
+      }))!;
       await this.refreshRoomPanel(updated);
       await interaction.reply({ content: password ? '🔐 Đã bật/đổi mật khẩu phòng.' : '🔓 Đã tắt mật khẩu phòng.', ephemeral: true });
     }
@@ -878,7 +892,7 @@ export class SgfBot {
     if (action === 'donate') return interaction.showModal(this.donationModal());
     if (action !== 'buy' || !productId) return;
     try {
-      const result = createProductPayment({ guildId: interaction.guild.id, userId: interaction.user.id, userTag: interaction.user.tag, productId });
+      const result = await createProductPayment({ guildId: interaction.guild.id, userId: interaction.user.id, userTag: interaction.user.tag, productId });
       await interaction.reply({ ephemeral: true, ...this.paymentMessage(result) });
     } catch (error) {
       await interaction.reply({ content: error instanceof Error ? error.message : 'Không tạo được đơn thanh toán.', ephemeral: true });
@@ -890,7 +904,7 @@ export class SgfBot {
     const amount = Number(interaction.fields.getTextInputValue('amount').replace(/[^0-9]/g, ''));
     const note = interaction.fields.getTextInputValue('note').trim();
     try {
-      const result = createDonationPayment({ guildId: interaction.guild.id, userId: interaction.user.id, userTag: interaction.user.tag, amountVnd: amount, note });
+      const result = await createDonationPayment({ guildId: interaction.guild.id, userId: interaction.user.id, userTag: interaction.user.tag, amountVnd: amount, note });
       await interaction.reply({ ephemeral: true, ...this.paymentMessage(result) });
     } catch (error) {
       await interaction.reply({ content: error instanceof Error ? error.message : 'Không tạo được đơn donate.', ephemeral: true });
@@ -918,8 +932,16 @@ export class SgfBot {
   async listGuildMembers(guildId: string, force = false): Promise<GuildMemberView[]> {
     const guild = this.client.guilds.cache.get(guildId);
     if (!guild) throw new Error('Bot chưa ở trong server.');
-    const snapshot = this.guildMemberSnapshots.get(guildId);
+    let snapshot = this.guildMemberSnapshots.get(guildId);
     if (!force && snapshot && snapshot.expiresAt > Date.now()) return snapshot.data;
+    if (!force && cache.backend !== 'memory') {
+      const cachedMembers = await cache.getJson<GuildMemberView[]>(`guild-members:${guildId}`);
+      if (cachedMembers) {
+        snapshot = { expiresAt: Date.now() + 5 * 60_000, data: cachedMembers };
+        this.guildMemberSnapshots.set(guildId, snapshot);
+        return cachedMembers;
+      }
+    }
     const retryAt = this.guildMemberRetryAt.get(guildId) || 0;
     if (retryAt > Date.now() && !snapshot) throw new Error(`Discord đang giới hạn member fetch. Thử lại sau ${Math.ceil((retryAt - Date.now()) / 1000)} giây.`);
     const running = this.guildMemberFetches.get(guildId);
@@ -939,6 +961,7 @@ export class SgfBot {
           roleIds: [...member.roles.cache.keys()].filter((roleId) => roleId !== guild.id),
         }));
         this.guildMemberSnapshots.set(guildId, { expiresAt: Date.now() + 5 * 60_000, data });
+        if (cache.backend !== 'memory') await cache.setJson(`guild-members:${guildId}`, data, 300);
         this.guildMemberRetryAt.delete(guildId);
         return data;
       } catch (error) {
@@ -962,12 +985,12 @@ export class SgfBot {
   async listLiveRooms(guildId: string, actorId: string, includeAll = false): Promise<LiveRoomView[]> {
     const guild = this.client.guilds.cache.get(guildId);
     if (!guild) throw new Error('Bot chưa ở trong server.');
-    const rooms = store.listRooms(guildId).filter((room) => includeAll || room.ownerId === actorId);
+    const rooms = (await store.listRooms(guildId)).filter((room) => includeAll || room.ownerId === actorId);
     const result: LiveRoomView[] = [];
     for (const room of rooms) {
       const channel = guild.channels.cache.get(room.channelId);
       if (!channel?.isVoiceBased()) {
-        store.deleteRoomByChannel(room.channelId);
+        await store.deleteRoomByChannel(room.channelId);
         continue;
       }
       const everyoneOverwrite = channel.permissionOverwrites.cache.get(guild.roles.everyone.id);
@@ -993,7 +1016,7 @@ export class SgfBot {
 
   async manageRoom(input: { guildId: string; actorId: string; admin: boolean; channelId: string; action: RoomDashboardAction; value?: string | number | boolean; targetUserId?: string }): Promise<string> {
     const guild = this.client.guilds.cache.get(input.guildId);
-    const room = store.getRoomByChannel(input.channelId);
+    const room = await store.getRoomByChannel(input.channelId);
     const channel = guild?.channels.cache.get(input.channelId);
     if (!guild || !room || !channel?.isVoiceBased()) throw new Error('Phòng không còn tồn tại.');
     if (!input.admin && room.ownerId !== input.actorId) throw new Error('Bạn chỉ có thể quản lý phòng mình đang host.');
@@ -1024,22 +1047,24 @@ export class SgfBot {
     }
     if (input.action === 'password') {
       const password = String(input.value || '').trim();
-      store.clearRoomAccess(room.id);
-      const updated = password
-        ? (() => { const salt = crypto.randomBytes(16).toString('hex'); return store.updateRoom(room.channelId, { passwordSalt: salt, passwordHash: passwordDigest(password, salt) })!; })()
-        : store.updateRoom(room.channelId, { passwordSalt: '', passwordHash: '' })!;
+      await store.clearRoomAccess(room.id);
+      const salt = password ? crypto.randomBytes(16).toString('hex') : '';
+      const updated = (await store.updateRoom(room.channelId, {
+        passwordSalt: salt,
+        passwordHash: password ? passwordDigest(password, salt) : '',
+      }))!;
       await this.refreshRoomPanel(updated);
       return password ? 'Đã bật/đổi mật khẩu.' : 'Đã tắt mật khẩu.';
     }
     if (input.action === 'notifications') {
-      const updated = store.updateRoom(room.channelId, { notifyJoinLeave: Boolean(input.value) })!;
+      const updated = (await store.updateRoom(room.channelId, { notifyJoinLeave: Boolean(input.value) }))!;
       await this.refreshRoomPanel(updated);
       return `Đã ${updated.notifyJoinLeave ? 'bật' : 'tắt'} thông báo ra/vào.`;
     }
     if (input.action === 'invite') {
       const target = await guild.members.fetch(String(input.targetUserId || '')).catch(() => null);
       if (!target) throw new Error('Không tìm thấy member cần mời.');
-      store.grantRoomAccess(room.id, target.id);
+      await store.grantRoomAccess(room.id, target.id);
       await channel.permissionOverwrites.edit(target.id, { ViewChannel: true, Connect: true });
       return `Đã mời ${target.user.tag}.`;
     }
@@ -1048,7 +1073,7 @@ export class SgfBot {
       if (!target || target.voice.channelId !== room.channelId) throw new Error('Member không ở trong phòng.');
       if (target.id === room.ownerId) throw new Error('Không thể chọn host hiện tại.');
       if (input.action === 'kick') {
-        store.revokeRoomAccess(room.id, target.id);
+        await store.revokeRoomAccess(room.id, target.id);
         await channel.permissionOverwrites.delete(target.id, 'Thu hồi quyền khi bị kick').catch(() => undefined);
         await target.voice.disconnect(`Dashboard kick by ${input.actorId}`);
         return `Đã kick ${target.user.tag} và thu hồi quyền truy cập.`;
@@ -1057,7 +1082,7 @@ export class SgfBot {
       return `Đã chuyển host cho ${target.user.tag}.`;
     }
     if (input.action === 'delete') {
-      store.deleteRoomByChannel(room.channelId);
+      await store.deleteRoomByChannel(room.channelId);
       await channel.delete(`Dashboard delete by ${input.actorId}`);
       return 'Đã xóa phòng.';
     }
@@ -1073,7 +1098,7 @@ export class SgfBot {
     }
     if (input.allowedRoleId && !guild.roles.cache.has(input.allowedRoleId)) throw new Error('Allowed Role ID không tồn tại trong server.');
     const channel = await guild.channels.create({ name: label, type: ChannelType.GuildVoice, parent: parentId || undefined, reason: `SGF create ${input.mode} creator channel` });
-    const settings = store.getSettings(guild.id, guild.name);
+    const settings = await store.getSettings(guild.id, guild.name);
     const creator: CreatorChannelConfig = {
       channelId: channel.id,
       label,
@@ -1083,16 +1108,17 @@ export class SgfBot {
       notifyJoinLeave: Boolean(input.notifyJoinLeave),
       autoTransferOwner: input.autoTransferOwner !== false,
     };
-    store.updateSettings(guild.id, { creatorChannels: [...settings.creatorChannels, creator] });
+    await store.updateSettings(guild.id, { creatorChannels: [...settings.creatorChannels, creator] });
     return creator;
   }
 
-  async postPaymentPanel(guild: Guild, settings = store.getSettings(guild.id, guild.name)): Promise<string> {
+  async postPaymentPanel(guild: Guild, providedSettings?: GuildSettings): Promise<string> {
+    const settings = providedSettings || await store.getSettings(guild.id, guild.name);
     const channelId = settings.paymentPanelChannelId;
     if (!channelId) return 'Chưa cấu hình kênh payment panel. Dùng `/sgf setup` với option `payment_channel` trước.';
     const channel = guild.channels.cache.get(channelId);
     if (!channel?.isTextBased()) return 'Kênh payment panel đã cấu hình không còn hợp lệ. Hãy chọn lại bằng `/sgf setup`.';
-    const products = store.listProducts(guild.id, true);
+    const products = await store.listProducts(guild.id, true);
     const embed = new EmbedBuilder()
       .setColor(0x5865f2)
       .setTitle('SGF Premium theo tháng')

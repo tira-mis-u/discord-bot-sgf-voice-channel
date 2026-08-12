@@ -1,26 +1,40 @@
-# Redis preparation
+# Redis runtime
 
-Redis is optional and must not replace PostgreSQL as the source of truth.
+Redis is optional and never replaces PostgreSQL as the source of truth.
 
-Supported environment contract prepared in `.env.example`:
+## Credentials
+
+Use either standard Redis:
 
 ```env
-# Standard TCP/TLS Redis
 REDIS_URL=rediss://...
+```
 
-# Or Upstash REST
+or Upstash REST:
+
+```env
 UPSTASH_REDIS_REST_URL=https://...
 UPSTASH_REDIS_REST_TOKEN=...
 ```
 
-Planned Redis responsibilities:
+If both are configured, `REDIS_URL` is preferred. If neither is configured, the app falls back to in-memory cache for local development.
 
-- Discord member snapshot cache.
-- Password-attempt rate limits.
-- Room-creation distributed locks.
-- SePay reconciliation cooldowns.
-- OAuth sessions with TTL if desired.
+## Data stored in Redis
 
-Payments, entitlements, creator settings and room ownership remain in PostgreSQL. No Redis credential is exposed to frontend code.
+- Discord OAuth sessions with TTL.
+- Discord member snapshots for five minutes.
+- Distributed room-creation locks.
+- Room-password attempt counters.
+- SePay reconciliation results and locks.
 
-The runtime Redis adapter is not enabled yet because the provider type was not confirmed. Use exactly one credential style above.
+## Data kept in PostgreSQL
+
+- Guild and creator setup.
+- Products and prices.
+- Active room ownership and settings.
+- Room access grants.
+- Payments and idempotency events.
+- Premium entitlements and expiry reminders.
+- Unmatched SePay transactions.
+
+`/api/health` reports `cacheBackend` as `redis`, `upstash` or `memory` without exposing credentials.

@@ -129,11 +129,10 @@ curl -H "X-SGF-Secret: $SGF_BOT_API_SECRET" \
 
 Không đưa `SGF_INTEGRATION_SECRET` vào JavaScript frontend. Nếu frontend cần dashboard riêng, SGF backend proxy dữ liệu hoặc tạo endpoint riêng có auth của SGF.
 
-## Database
+## Database và Redis
 
-Starter dùng SQLite để cài nhanh. Khi chạy nhiều bot/server hoặc nhiều worker:
+Production dùng Supabase PostgreSQL bằng `DATABASE_URL`. Chạy `npm run db:migrate:supabase` một lần để áp dụng schema và copy dữ liệu SQLite hiện có. Runtime tự chọn PostgreSQL khi biến này tồn tại và chỉ fallback SQLite cho local development.
 
-- dùng một process bot chính để xử lý Discord gateway;
-- chuyển store sang PostgreSQL/Prisma hoặc Drizzle;
-- đặt job expiry entitlement và cleanup giao dịch unmatched;
-- encrypt OAuth refresh token at rest hoặc dùng secret store.
+Redis hoặc Upstash lưu OAuth session có TTL, member cache, password rate limit, room-creation lock và SePay reconciliation cooldown. Payment, entitlement, room ownership và guild setup luôn nằm trong PostgreSQL.
+
+Kiểm tra `/api/health`: `databaseBackend` phải là `postgresql`; `cacheBackend` phải là `redis` hoặc `upstash`.

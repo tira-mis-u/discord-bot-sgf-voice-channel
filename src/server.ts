@@ -7,13 +7,15 @@ import cors from 'cors';
 import { z } from 'zod';
 import { ChannelType } from 'discord.js';
 import { config } from './config.js';
-import { store } from './db.js';
+import { databaseBackend, store } from './db.js';
+import { cache } from './cache.js';
 import { SgfBot } from './bot.js';
 import type { AuthSession, OAuthGuild, SessionUser } from './types.js';
 import { clampText, escapeHtml, isDiscordAdmin, parseVnd } from './utils.js';
 import { createDonationPayment, createProductPayment, reconcilePendingPayment } from './services/payment-service.js';
 import { verifySepayWebhook } from './services/sepay.js';
 import { getSepayApiStatus, isSepayApiConfigured } from './services/sepay-api.js';
+import { sessionStore } from './services/session-store.js';
 
 const publicDir = path.resolve('public');
 const app = express();
@@ -54,7 +56,7 @@ async function refreshSession(session: AuthSession): Promise<AuthSession> {
   });
   if (!response.ok) return session;
   const data = await response.json() as { access_token: string; refresh_token?: string; expires_in: number };
-  return store.updateSession(session.id, { accessToken: data.access_token, refreshToken: data.refresh_token || session.refreshToken, expiresAt: Date.now() + data.expires_in * 1000 }) || session;
+  return await sessionStore.update(session.id, { accessToken: data.access_token, refreshToken: data.refresh_token || session.refreshToken, expiresAt: Date.now() + data.expires_in * 1000 }) || session;
 }
 
 async function loadSession(req: AuthRequest, _res: Response, next: NextFunction): Promise<void> {
@@ -64,7 +66,7 @@ async function loadSession(req: AuthRequest, _res: Response, next: NextFunction)
       next();
       return;
     }
-    const session = store.getSession(sessionId);
+    const session = await sessionStore.get(sessionId);
     req.authSession = session ? await refreshSession(session) : undefined;
     next();
   } catch (error) {
@@ -146,7 +148,7 @@ async function discordApi<T>(endpoint: string, accessToken: string): Promise<T> 
   return response.json() as Promise<T>;
 }
 
-app.get('/auth/discord', (req: Request, res: Response) => {
+app.get('/auth/discord', async (req: Request, res: Response) => {
   if (!config.discord.clientId || !config.discord.clientSecret) {
     res.status(503).send('Discord OAuth chưa được cấu hình.');
     return;
@@ -193,7 +195,7 @@ app.get('/auth/discord/callback', async (req: Request, res: Response) => {
     const token = JSON.parse(tokenBody) as { access_token: string; refresh_token: string; expires_in: number };
     const user = await discordApi<{ id: string; username: string; global_name?: string; avatar?: string }>('/users/@me', token.access_token);
     const guilds = await discordApi<OAuthGuild[]>('/users/@me/guilds', token.access_token);
-    const session = store.createSession({ user: { id: user.id, username: user.username, globalName: user.global_name, avatar: user.avatar }, accessToken: token.access_token, refreshToken: token.refresh_token, expiresAt: Date.now() + token.expires_in * 1000, guilds });
+    const session = await sessionStore.create({ user: { id: user.id, username: user.username, globalName: user.global_name, avatar: user.avatar }, accessToken: token.access_token, refreshToken: token.refresh_token, expiresAt: Date.now() + token.expires_in * 1000, guilds });
     res.cookie('sgf_session', session.id, cookieOptions());
     res.clearCookie('oauth_state');
     res.clearCookie('oauth_return');
@@ -205,17 +207,20 @@ app.get('/auth/discord/callback', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/auth/logout', (req: AuthRequest, res: Response) => {
-  if (req.authSession) store.deleteSession(req.authSession.id);
+app.post('/auth/logout', async (req: AuthRequest, res: Response) => {
+  if (req.authSession) await sessionStore.delete(req.authSession.id);
   res.clearCookie('sgf_session');
   res.json({ ok: true });
 });
 
-app.get('/api/health', (_req, res) => res.json({
+app.get('/api/health', async (_req, res) => res.json({
   ok: true,
   service: 'sgf-discord-bot',
-  databasePersistence: config.databasePersistence,
+  databaseBackend,
+  databasePersistence: databaseBackend === 'postgresql' ? 'persistent' : config.databasePersistence,
   postgresConfigured: Boolean(config.databaseUrl),
+  cacheBackend: cache.backend,
+  cacheReachable: await cache.ping(),
   redisConfigured: Boolean(config.redis.url || (config.redis.upstashRestUrl && config.redis.upstashRestToken)),
   vercel: config.isVercel,
   time: new Date().toISOString(),
@@ -236,33 +241,36 @@ app.get('/api/runtime', (_req, res) => {
   });
 });
 
-app.get('/api/session', (req: AuthRequest, res: Response) => {
+app.get('/api/session', async (req: AuthRequest, res: Response) => {
   res.json({ authenticated: Boolean(req.authSession), user: req.authSession?.user || null });
 });
 
-app.get('/api/guilds', requireAuth, (req: AuthRequest, res: Response) => {
-  const guilds = (req.authSession?.guilds || [])
-    .map((guild) => ({ ...guild, canManage: isDiscordAdmin(guild.permissions, guild.owner), bot: bot.getGuildAccess(guild.id), settings: store.getSettings(guild.id, guild.name) }))
-    .filter((guild) => guild.bot.present && guild.bot.administrator);
+app.get('/api/guilds', requireAuth, async (req: AuthRequest, res: Response) => {
+  const guilds = (await Promise.all((req.authSession?.guilds || []).map(async (guild) => ({
+    ...guild,
+    canManage: isDiscordAdmin(guild.permissions, guild.owner),
+    bot: bot.getGuildAccess(guild.id),
+    settings: await store.getSettings(guild.id, guild.name),
+  })))).filter((guild) => guild.bot.present && guild.bot.administrator);
   res.json({ guilds });
 });
 
-app.get('/api/guilds/:guildId', requireAuth, (req: AuthRequest, res: Response) => {
+app.get('/api/guilds/:guildId', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!requireGuildAccess(req, res, guildId)) return;
   const guild = sessionGuild(req.authSession, guildId);
-  const settings = store.getSettings(guildId, guild?.name || '');
+  const settings = await store.getSettings(guildId, guild?.name || '');
   const canManage = canManageGuild(req, guildId);
-  const entitlement = req.authSession ? store.getEntitlement(guildId, req.authSession.user.id) : undefined;
+  const entitlement = req.authSession ? await store.getEntitlement(guildId, req.authSession.user.id) : undefined;
   res.json({
     guild: guild || { id: guildId, name: settings.guildName },
     canManage,
     bot: bot.getGuildAccess(guildId),
     subscription: { premium: Boolean(entitlement), expiresAt: entitlement?.expiresAt || '', freeEditableLimit: 1 },
     settings,
-    products: store.listProducts(guildId, !canManage),
-    stats: canManage ? store.getStats(guildId) : { paidTotalVnd: 0, paidCount: 0, pendingCount: 0, donorCount: 0, activeRooms: 0 },
-    rooms: canManage ? store.listRooms(guildId).map(({ passwordHash, passwordSalt: _passwordSalt, ...room }) => ({ ...room, passwordEnabled: Boolean(passwordHash) })) : [],
+    products: await store.listProducts(guildId, !canManage),
+    stats: canManage ? await store.getStats(guildId) : { paidTotalVnd: 0, paidCount: 0, pendingCount: 0, donorCount: 0, activeRooms: 0 },
+    rooms: canManage ? (await store.listRooms(guildId)).map(({ passwordHash, passwordSalt: _passwordSalt, ...room }) => ({ ...room, passwordEnabled: Boolean(passwordHash) })) : [],
     sepay: { webhookConfigured: Boolean(config.sepay.webhookApiKey), apiTokenConfigured: isSepayApiConfigured(), apiBaseUrl: config.sepay.apiBaseUrl, dynamicQrConfigured: Boolean(settings.bankCode || config.sepay.bankCode) && Boolean(settings.bankAccountNumber || config.sepay.accountNumber), staticQrConfigured: Boolean(settings.staticQrUrl || config.sepay.staticQrUrl), webhookUrl: `${config.publicUrl}/api/payments/sepay/webhook` },
     integration: { paymentsEndpoint: `${config.publicUrl}/api/integrations/sgf/payments`, entitlementsEndpoint: `${config.publicUrl}/api/integrations/sgf/entitlements`, eventsConfigured: Boolean(config.sgf.eventsWebhookUrl) },
   });
@@ -317,13 +325,13 @@ app.post('/api/guilds/:guildId/creator-channels', requireAuth, async (req: AuthR
   }
   try {
     const creator = await bot.createCreatorChannel(discordGuild, input.data);
-    res.status(201).json({ creator, settings: store.getSettings(guildId, discordGuild.name) });
+    res.status(201).json({ creator, settings: await store.getSettings(guildId, discordGuild.name) });
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : 'Không tạo được creator channel.' });
   }
 });
 
-app.put('/api/guilds/:guildId/settings', requireAuth, (req: AuthRequest, res: Response) => {
+app.put('/api/guilds/:guildId/settings', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
   const parsed = settingsInput.safeParse(req.body);
@@ -357,7 +365,7 @@ app.put('/api/guilds/:guildId/settings', requireAuth, (req: AuthRequest, res: Re
   }
   const guild = sessionGuild(req.authSession, guildId);
   const patch = { ...parsed.data, ...(guild?.name ? { guildName: guild.name } : {}) };
-  const settings = store.updateSettings(guildId, patch);
+  const settings = await store.updateSettings(guildId, patch);
   res.json({ settings });
 });
 
@@ -371,7 +379,7 @@ const productInput = z.object({
   sortOrder: z.number().int().min(0).max(999).default(0),
 });
 
-app.post('/api/guilds/:guildId/products', requireAuth, (req: AuthRequest, res: Response) => {
+app.post('/api/guilds/:guildId/products', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
   const parsed = productInput.safeParse(req.body);
@@ -379,15 +387,15 @@ app.post('/api/guilds/:guildId/products', requireAuth, (req: AuthRequest, res: R
     res.status(400).json({ error: 'INVALID_PRODUCT', details: parsed.error.flatten() });
     return;
   }
-  const product = store.createProduct({ guildId, ...parsed.data });
+  const product = await store.createProduct({ guildId, ...parsed.data });
   res.status(201).json({ product });
 });
 
-app.put('/api/guilds/:guildId/products/:productId', requireAuth, (req: AuthRequest, res: Response) => {
+app.put('/api/guilds/:guildId/products/:productId', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   const productId = String(req.params.productId);
   if (!requireGuildAdmin(req, res, guildId)) return;
-  const existing = store.getProduct(productId);
+  const existing = await store.getProduct(productId);
   if (!existing || existing.guildId !== guildId) {
     res.status(404).json({ error: 'PRODUCT_NOT_FOUND' });
     return;
@@ -397,19 +405,19 @@ app.put('/api/guilds/:guildId/products/:productId', requireAuth, (req: AuthReque
     res.status(400).json({ error: 'INVALID_PRODUCT', details: parsed.error.flatten() });
     return;
   }
-  res.json({ product: store.updateProduct(productId, parsed.data) });
+  res.json({ product: await store.updateProduct(productId, parsed.data) });
 });
 
-app.delete('/api/guilds/:guildId/products/:productId', requireAuth, (req: AuthRequest, res: Response) => {
+app.delete('/api/guilds/:guildId/products/:productId', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   const productId = String(req.params.productId);
   if (!requireGuildAdmin(req, res, guildId)) return;
-  const existing = store.getProduct(productId);
+  const existing = await store.getProduct(productId);
   if (!existing || existing.guildId !== guildId) {
     res.status(404).json({ error: 'PRODUCT_NOT_FOUND' });
     return;
   }
-  store.deleteProduct(productId);
+  await store.deleteProduct(productId);
   res.json({ ok: true });
 });
 
@@ -420,17 +428,17 @@ app.get('/api/guilds/:guildId/sepay-status', requireAuth, async (req: AuthReques
   res.json({ status });
 });
 
-app.get('/api/guilds/:guildId/payments', requireAuth, (req: AuthRequest, res: Response) => {
+app.get('/api/guilds/:guildId/payments', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
   const limit = Math.min(500, Math.max(1, Number(req.query.limit || 100)));
-  res.json({ payments: store.listPayments(guildId, Number.isFinite(limit) ? limit : 100) });
+  res.json({ payments: await store.listPayments(guildId, Number.isFinite(limit) ? limit : 100) });
 });
 
-app.get('/api/guilds/:guildId/rooms', requireAuth, (req: AuthRequest, res: Response) => {
+app.get('/api/guilds/:guildId/rooms', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
-  res.json({ rooms: store.listRooms(guildId).map(({ passwordHash: _passwordHash, passwordSalt: _passwordSalt, ...room }) => ({ ...room, passwordEnabled: Boolean(_passwordHash) })) });
+  res.json({ rooms: (await store.listRooms(guildId)).map(({ passwordHash: _passwordHash, passwordSalt: _passwordSalt, ...room }) => ({ ...room, passwordEnabled: Boolean(_passwordHash) })) });
 });
 
 app.get('/api/guilds/:guildId/live-rooms', requireAuth, async (req: AuthRequest, res: Response) => {
@@ -439,7 +447,7 @@ app.get('/api/guilds/:guildId/live-rooms', requireAuth, async (req: AuthRequest,
   try {
     const admin = canManageGuild(req, guildId);
     const rooms = await bot.listLiveRooms(guildId, req.authSession!.user.id, admin);
-    const entitlement = store.getEntitlement(guildId, req.authSession!.user.id);
+    const entitlement = await store.getEntitlement(guildId, req.authSession!.user.id);
     res.json({ rooms, admin, subscription: { premium: Boolean(entitlement), expiresAt: entitlement?.expiresAt || '', freeEditableLimit: 1 } });
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : 'Không đọc được phòng voice.' });
@@ -478,8 +486,8 @@ app.get('/api/guilds/:guildId/members', requireAuth, async (req: AuthRequest, re
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
   try {
-    const paidSummary = store.getPaidUserSummary(guildId);
-    const entitlements = store.listEntitlements(guildId);
+    const paidSummary = await store.getPaidUserSummary(guildId);
+    const entitlements = await store.listEntitlements(guildId);
     const activeByUser = new Set(entitlements.filter((item) => item.status === 'active' && (!item.expiresAt || new Date(item.expiresAt).getTime() > Date.now())).map((item) => item.discordUserId));
     const members = await bot.listGuildMembers(guildId, String(req.query.refresh || '') === '1');
     res.json({
@@ -503,16 +511,18 @@ app.post('/api/guilds/:guildId/payment-panel', requireAuth, async (req: AuthRequ
     res.status(409).json({ error: 'BOT_NOT_IN_GUILD', message: 'Bot chưa ở trong server này.' });
     return;
   }
-  const result = await bot.postPaymentPanel(discordGuild, store.getSettings(guildId, guild?.name || ''));
+  const result = await bot.postPaymentPanel(discordGuild, await store.getSettings(guildId, guild?.name || ''));
   res.json({ ok: true, message: result });
 });
 
-app.get('/api/public/guilds/:guildId/products', (req: Request, res: Response) => {
-  const products = store.listProducts(String(req.params.guildId), true).map(({ id, guildId, name, description, priceVnd, durationDays }) => ({ id, guildId, name, description, priceVnd, durationDays }));
-  res.json({ products, settings: { donationMinVnd: store.getSettings(String(req.params.guildId)).donationMinVnd } });
+app.get('/api/public/guilds/:guildId/products', async (req: Request, res: Response) => {
+  const guildId = String(req.params.guildId);
+  const products = (await store.listProducts(guildId, true)).map(({ id, guildId: productGuildId, name, description, priceVnd, durationDays }) => ({ id, guildId: productGuildId, name, description, priceVnd, durationDays }));
+  const settings = await store.getSettings(guildId);
+  res.json({ products, settings: { donationMinVnd: settings.donationMinVnd } });
 });
 
-app.post('/api/public/guilds/:guildId/payment', requireAuth, (req: AuthRequest, res: Response) => {
+app.post('/api/public/guilds/:guildId/payment', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!canAccessGuild(req, guildId)) {
     res.status(403).json({ error: 'GUILD_ACCESS_REQUIRED', message: 'Bạn phải là thành viên của server để mua gói.' });
@@ -521,14 +531,14 @@ app.post('/api/public/guilds/:guildId/payment', requireAuth, (req: AuthRequest, 
   const productId = String(req.body?.productId || '');
   try {
     const user = req.authSession!.user;
-    const result = createProductPayment({ guildId, userId: user.id, userTag: user.username, productId });
+    const result = await createProductPayment({ guildId, userId: user.id, userTag: user.username, productId });
     res.status(201).json({ ...result, payment: { ...result.payment, qrUrl: result.payment.qrUrl, checkoutUrl: result.payment.checkoutUrl } });
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : 'Không tạo được đơn.' });
   }
 });
 
-app.post('/api/public/guilds/:guildId/donation', requireAuth, (req: AuthRequest, res: Response) => {
+app.post('/api/public/guilds/:guildId/donation', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!canAccessGuild(req, guildId)) {
     res.status(403).json({ error: 'GUILD_ACCESS_REQUIRED', message: 'Bạn phải là thành viên của server để donate.' });
@@ -536,7 +546,7 @@ app.post('/api/public/guilds/:guildId/donation', requireAuth, (req: AuthRequest,
   }
   try {
     const user = req.authSession!.user;
-    const result = createDonationPayment({ guildId, userId: user.id, userTag: user.username, amountVnd: parseVnd(req.body?.amountVnd), note: clampText(req.body?.note, 200) });
+    const result = await createDonationPayment({ guildId, userId: user.id, userTag: user.username, amountVnd: parseVnd(req.body?.amountVnd), note: clampText(req.body?.note, 200) });
     res.status(201).json({ ...result, payment: { ...result.payment, qrUrl: result.payment.qrUrl, checkoutUrl: result.payment.checkoutUrl } });
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : 'Không tạo được đơn.' });
@@ -544,7 +554,7 @@ app.post('/api/public/guilds/:guildId/donation', requireAuth, (req: AuthRequest,
 });
 
 app.get('/api/public/payments/:paymentId', requireAuth, async (req: AuthRequest, res: Response) => {
-  let payment = store.getPayment(String(req.params.paymentId));
+  let payment = await store.getPayment(String(req.params.paymentId));
   if (!payment) {
     res.status(404).json({ error: 'PAYMENT_NOT_FOUND' });
     return;
@@ -558,9 +568,9 @@ app.get('/api/public/payments/:paymentId', requireAuth, async (req: AuthRequest,
   const reconciliation = payment.status === 'pending'
     ? await reconcilePendingPayment(bot.client, payment.id)
     : { configured: isSepayApiConfigured(), checked: false, matched: payment.status === 'paid', message: '', checkedAt: '' };
-  payment = store.getPayment(payment.id) || payment;
-  const settings = store.getSettings(payment.guildId);
-  res.json({ payment, reconciliation, product: payment.productId ? store.getProduct(payment.productId) : undefined, paymentInfo: { bankCode: settings.bankCode || config.sepay.bankCode, accountNumber: settings.bankAccountNumber || config.sepay.accountNumber, accountName: settings.bankAccountName || config.sepay.accountName } });
+  payment = await store.getPayment(payment.id) || payment;
+  const settings = await store.getSettings(payment.guildId);
+  res.json({ payment, reconciliation, product: payment.productId ? await store.getProduct(payment.productId) : undefined, paymentInfo: { bankCode: settings.bankCode || config.sepay.bankCode, accountNumber: settings.bankAccountNumber || config.sepay.accountNumber, accountName: settings.bankAccountName || config.sepay.accountName } });
 });
 
 app.post('/api/payments/sepay/webhook', async (req: Request, res: Response) => {
@@ -577,7 +587,7 @@ app.post('/api/payments/sepay/webhook', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/integrations/sgf/payments', (req: Request, res: Response) => {
+app.get('/api/integrations/sgf/payments', async (req: Request, res: Response) => {
   if (!requireSgfIntegration(req, res)) return;
   const guildId = String(req.query.guildId || '');
   if (!guildId) {
@@ -585,17 +595,17 @@ app.get('/api/integrations/sgf/payments', (req: Request, res: Response) => {
     return;
   }
   const limit = Math.min(500, Math.max(1, Number(req.query.limit || 100)));
-  res.json({ data: store.listPayments(guildId, Number.isFinite(limit) ? limit : 100) });
+  res.json({ data: await store.listPayments(guildId, Number.isFinite(limit) ? limit : 100) });
 });
 
-app.get('/api/integrations/sgf/entitlements', (req: Request, res: Response) => {
+app.get('/api/integrations/sgf/entitlements', async (req: Request, res: Response) => {
   if (!requireSgfIntegration(req, res)) return;
   const guildId = String(req.query.guildId || '');
   if (!guildId) {
     res.status(400).json({ error: 'guildId is required' });
     return;
   }
-  res.json({ data: store.listEntitlements(guildId, String(req.query.discordUserId || '') || undefined) });
+  res.json({ data: await store.listEntitlements(guildId, String(req.query.discordUserId || '') || undefined) });
 });
 
 app.get('/', (_req, res) => res.sendFile(path.join(publicDir, 'dashboard.html')));

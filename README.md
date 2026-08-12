@@ -14,7 +14,8 @@ Bot Discord cho SGF gồm các phần trong một service:
 
 - Node.js 20+ / TypeScript / Express 5
 - discord.js 14
-- SQLite + better-sqlite3 (đủ cho một bot; có thể chuyển adapter sang PostgreSQL khi scale lớn)
+- Supabase PostgreSQL khi có `DATABASE_URL`; SQLite async fallback cho local development
+- Redis hoặc Upstash cho session, cache, rate limit và distributed lock
 - Dashboard dùng TypeScript source tại `src/web/*.ts`, compile thành browser JavaScript tại `public/*.js` (trình duyệt không chạy trực tiếp TypeScript).
 
 ## Chạy local

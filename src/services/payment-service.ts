@@ -1,5 +1,6 @@
 import type { Client, GuildMember } from 'discord.js';
 import { config } from '../config.js';
+import { cache } from '../cache.js';
 import { store } from '../db.js';
 import type { Payment, Product, SepayWebhookPayload } from '../types.js';
 import { formatVnd } from '../utils.js';
@@ -19,8 +20,8 @@ export function makeCheckoutUrl(paymentId: string): string {
   return `${config.publicUrl}/checkout/payment/${encodeURIComponent(paymentId)}`;
 }
 
-function paymentDetails(guildId: string, amount: number, type: 'product' | 'donation', note = '') {
-  const settings = store.getSettings(guildId);
+async function paymentDetails(guildId: string, amount: number, type: 'product' | 'donation', note = '') {
+  const settings = await store.getSettings(guildId);
   const orderCode = createOrderCode(type);
   const qr = buildPaymentQr(settings, amount, orderCode);
   return {
@@ -34,12 +35,12 @@ function paymentDetails(guildId: string, amount: number, type: 'product' | 'dona
   };
 }
 
-export function createProductPayment(input: { guildId: string; userId: string; userTag: string; productId: string }): PaymentCreationResult {
-  const product = store.getProduct(input.productId);
+export async function createProductPayment(input: { guildId: string; userId: string; userTag: string; productId: string }): Promise<PaymentCreationResult> {
+  const product = await store.getProduct(input.productId);
   if (!product || product.guildId !== input.guildId || !product.active) throw new Error('Gói Premium không tồn tại hoặc đã tắt.');
   if (product.priceVnd < 1000) throw new Error('Giá gói phải từ 1.000 ₫.');
-  const details = paymentDetails(input.guildId, product.priceVnd, 'product');
-  const payment = store.createPayment({
+  const details = await paymentDetails(input.guildId, product.priceVnd, 'product');
+  const payment = await store.createPayment({
     guildId: input.guildId,
     discordUserId: input.userId,
     discordUserTag: input.userTag,
@@ -51,16 +52,16 @@ export function createProductPayment(input: { guildId: string; userId: string; u
     checkoutUrl: '',
     note: product.name,
   });
-  store.updatePaymentCheckout(payment.id, makeCheckoutUrl(payment.id));
-  const withUrl = store.getPayment(payment.id)!;
+  await store.updatePaymentCheckout(payment.id, makeCheckoutUrl(payment.id));
+  const withUrl = (await store.getPayment(payment.id))!;
   return { payment: withUrl, product, qrDynamic: details.qr.dynamic, bankCode: details.bankCode, accountNumber: details.accountNumber, accountName: details.accountName };
 }
 
-export function createDonationPayment(input: { guildId: string; userId: string; userTag: string; amountVnd: number; note?: string }): PaymentCreationResult {
-  const settings = store.getSettings(input.guildId);
+export async function createDonationPayment(input: { guildId: string; userId: string; userTag: string; amountVnd: number; note?: string }): Promise<PaymentCreationResult> {
+  const settings = await store.getSettings(input.guildId);
   if (input.amountVnd < settings.donationMinVnd) throw new Error(`Số tiền donate tối thiểu là ${formatVnd(settings.donationMinVnd)}.`);
-  const details = paymentDetails(input.guildId, input.amountVnd, 'donation', input.note);
-  const payment = store.createPayment({
+  const details = await paymentDetails(input.guildId, input.amountVnd, 'donation', input.note);
+  const payment = await store.createPayment({
     guildId: input.guildId,
     discordUserId: input.userId,
     discordUserTag: input.userTag,
@@ -72,7 +73,7 @@ export function createDonationPayment(input: { guildId: string; userId: string; 
     note: input.note || 'Donate cho SGF',
   });
   const responsePayment = { ...payment, checkoutUrl: makeCheckoutUrl(payment.id) };
-  store.updatePaymentCheckout(payment.id, makeCheckoutUrl(payment.id));
+  await store.updatePaymentCheckout(payment.id, makeCheckoutUrl(payment.id));
   return { payment: responsePayment, qrDynamic: details.qr.dynamic, bankCode: details.bankCode, accountNumber: details.accountNumber, accountName: details.accountName };
 }
 
@@ -84,11 +85,11 @@ export function calculateExpiry(durationDays: number, previousExpiry = ''): stri
 }
 
 async function grantRole(client: Client, payment: Payment, product: Product): Promise<{ granted: boolean; message: string }> {
-  const settings = store.getSettings(payment.guildId);
+  const settings = await store.getSettings(payment.guildId);
   const roleId = product.roleId || settings.premiumRoleId;
-  const existingEntitlement = store.getEntitlement(payment.guildId, payment.discordUserId, product.id);
+  const existingEntitlement = await store.getEntitlement(payment.guildId, payment.discordUserId, product.id);
   const expiresAt = calculateExpiry(product.durationDays, existingEntitlement?.expiresAt);
-  store.upsertEntitlement({ guildId: payment.guildId, discordUserId: payment.discordUserId, productId: product.id, roleId, paymentId: payment.id, expiresAt });
+  await store.upsertEntitlement({ guildId: payment.guildId, discordUserId: payment.discordUserId, productId: product.id, roleId, paymentId: payment.id, expiresAt });
 
   const guild = await client.guilds.fetch(payment.guildId).catch(() => null);
   if (!guild) return { granted: true, message: 'Premium đã kích hoạt, nhưng bot hiện không truy cập được server để cấp role.' };
@@ -106,35 +107,35 @@ async function grantRole(client: Client, payment: Payment, product: Product): Pr
 export async function settleSepayWebhook(client: Client, payload: SepayWebhookPayload): Promise<{ ok: boolean; matched: boolean; payment?: Payment; message: string }> {
   const transactionId = webhookTransactionId(payload);
   if (!isIncoming(payload)) return { ok: true, matched: false, message: 'Bỏ qua giao dịch tiền ra.' };
-  if (!store.recordPaymentEvent(transactionId, payload)) {
-    const previous = store.getPaymentByProviderTransaction(transactionId);
+  if (!await store.recordPaymentEvent(transactionId, payload)) {
+    const previous = await store.getPaymentByProviderTransaction(transactionId);
     return { ok: true, matched: Boolean(previous), payment: previous, message: 'Webhook trùng, đã xử lý trước đó.' };
   }
 
   const orderCode = extractOrderCode(payload);
-  const payment = orderCode ? store.getPaymentByCode(orderCode) : undefined;
+  const payment = orderCode ? await store.getPaymentByCode(orderCode) : undefined;
   if (!payment || payment.status !== 'pending') {
-    store.saveUnmatchedTransaction(transactionId, payload);
+    await store.saveUnmatchedTransaction(transactionId, payload);
     return { ok: true, matched: false, message: 'Không tìm thấy đơn pending khớp mã giao dịch.' };
   }
 
   const amount = webhookAmount(payload);
   if (amount < payment.expectedAmountVnd) {
-    store.saveUnmatchedTransaction(transactionId, { ...payload, reason: 'amount_too_low', expected: payment.expectedAmountVnd });
+    await store.saveUnmatchedTransaction(transactionId, { ...payload, reason: 'amount_too_low', expected: payment.expectedAmountVnd });
     return { ok: true, matched: false, payment, message: 'Số tiền nhận được nhỏ hơn số tiền đơn.' };
   }
 
-  const paid = store.markPaymentPaid(payment.id, {
+  const paid = await store.markPaymentPaid(payment.id, {
     amount,
     providerTransactionId: transactionId,
     providerReference: normalizeText(payload.referenceCode),
     transferContent: String(payload.content || payload.description || ''),
   });
-  if (!paid) return { ok: true, matched: true, payment: store.getPayment(payment.id), message: 'Đơn đã được cập nhật bởi request khác.' };
+  if (!paid) return { ok: true, matched: true, payment: await store.getPayment(payment.id), message: 'Đơn đã được cập nhật bởi request khác.' };
 
   let message = 'Đã ghi nhận thanh toán.';
   if (paid.type === 'product') {
-    const product = store.getProduct(paid.productId);
+    const product = await store.getProduct(paid.productId);
     if (product) {
       const roleResult = await grantRole(client, paid, product).catch((error: unknown) => ({ granted: false, message: error instanceof Error ? error.message : 'Không cấp được role.' }));
       message = roleResult.message;
@@ -156,20 +157,29 @@ const reconciliationCache = new Map<string, { at: number; result: Reconciliation
 const reconciliationInFlight = new Map<string, Promise<ReconciliationResult>>();
 
 export async function reconcilePendingPayment(client: Client, paymentId: string, force = false): Promise<ReconciliationResult> {
-  const payment = store.getPayment(paymentId);
+  const payment = await store.getPayment(paymentId);
   const checkedAt = new Date().toISOString();
   if (!isSepayApiConfigured()) return { configured: false, checked: false, matched: false, message: 'Chưa cấu hình SEPAY_API_TOKEN.', checkedAt };
   if (!payment) return { configured: true, checked: false, matched: false, message: 'Không tìm thấy đơn thanh toán.', checkedAt };
   if (payment.status !== 'pending') return { configured: true, checked: false, matched: payment.status === 'paid', message: `Đơn đang ở trạng thái ${payment.status}.`, checkedAt };
 
+  const reconciliationKey = `sepay-reconciliation:${paymentId}`;
+  if (!force && cache.backend !== 'memory') {
+    const distributedCached = await cache.getJson<ReconciliationResult>(reconciliationKey);
+    if (distributedCached) return distributedCached;
+  }
   const cached = reconciliationCache.get(paymentId);
   if (!force && cached && Date.now() - cached.at < 15_000) return cached.result;
   const running = reconciliationInFlight.get(paymentId);
   if (running) return running;
+  const lockKey = `sepay-lock:${paymentId}`;
+  if (cache.backend !== 'memory' && !await cache.setIfAbsent(lockKey, '1', 15)) {
+    return { configured: true, checked: false, matched: false, message: 'Một worker khác đang đối soát đơn này.', checkedAt };
+  }
 
   const task = (async () => {
     try {
-      const settings = store.getSettings(payment.guildId);
+      const settings = await store.getSettings(payment.guildId);
       const transactions = await findSepayTransactions({
         orderCode: payment.orderCode,
         expectedAmount: payment.expectedAmountVnd,
@@ -191,9 +201,11 @@ export async function reconcilePendingPayment(client: Client, paymentId: string,
   try {
     const result = await task;
     reconciliationCache.set(paymentId, { at: Date.now(), result });
+    if (cache.backend !== 'memory') await cache.setJson(reconciliationKey, result, 15);
     return result;
   } finally {
     reconciliationInFlight.delete(paymentId);
+    if (cache.backend !== 'memory') await cache.del(lockKey);
   }
 }
 

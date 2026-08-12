@@ -1,10 +1,8 @@
 # Supabase PostgreSQL migration
 
-## Credentials required
+## Required credentials
 
-The backend database adapter should use a PostgreSQL connection string, not the public anon API key.
-
-Set these without committing their values:
+Use a PostgreSQL connection string from Supabase Connect. The anon API key alone is not a database connection.
 
 ```env
 DATABASE_URL=postgresql://...pooler.supabase.com:5432/postgres
@@ -13,20 +11,33 @@ SUPABASE_URL=https://<project>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<server-side-only-key>
 ```
 
-For the persistent Discord bot worker, use Supavisor session mode on port 5432 when direct IPv6 is unavailable. Use the direct URL for migrations and backups. The service role key is optional for the SQL adapter and must never be exposed to browser JavaScript.
+For a persistent Discord bot worker, use Supavisor session mode on port 5432 when direct IPv6 is unavailable. Use the direct URL for migrations and backups. Never expose the service-role key or database URI to browser JavaScript.
 
-## Apply the schema
+## Apply schema and migrate SQLite data
 
-Run `supabase/migrations/0001_initial_schema.sql` in the Supabase SQL editor, or with the Supabase CLI.
+The idempotent PostgreSQL schema is in:
 
-The schema enables RLS and grants no browser role access. The Express backend remains the only application layer allowed to read or write bot data.
+```text
+supabase/migrations/0001_initial_schema.sql
+```
 
-## Migration status
+To apply the schema and copy existing SQLite data while preserving IDs:
 
-- PostgreSQL schema: prepared.
-- Environment contract: prepared.
-- SQLite-on-Vercel crash guard: implemented with temporary `/tmp` fallback.
-- Runtime store adapter: still SQLite until the async PostgreSQL repository migration is completed.
-- SQLite data copy: not run yet.
+```bash
+DATABASE_URL='postgresql://...' npm run db:migrate:supabase
+```
 
-Do not treat `/tmp/sgf.sqlite` on Vercel as persistent storage.
+The script copies guild settings, normalized creator channels, products, rooms, payments, payment events, entitlements, room access, reminder records and unmatched SePay transactions. OAuth sessions are intentionally not copied because new sessions go to Redis when Redis is configured.
+
+## Runtime selection
+
+- `DATABASE_URL` set: runtime uses PostgreSQL.
+- `DATABASE_URL` empty: runtime uses SQLite through an async compatibility adapter.
+- PostgreSQL mode does not initialize or write SQLite.
+- `/api/health` reports `databaseBackend`.
+
+All application stores are now asynchronous so the Discord bot, payment service and Express dashboard use the same PostgreSQL source of truth.
+
+## Security
+
+The migration enables RLS and revokes direct table access from Supabase `anon` and `authenticated` roles. The Express backend connects with the server-side database URI and remains the only application layer for bot data.
