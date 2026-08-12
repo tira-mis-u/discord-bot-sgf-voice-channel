@@ -115,6 +115,7 @@ sqlite.exec(`
     updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_entitlements_user ON entitlements(guild_id, discord_user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_entitlements_expiry ON entitlements(status, expires_at);
 
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -131,7 +132,31 @@ sqlite.exec(`
     payload_json TEXT NOT NULL,
     received_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS room_access (
+    room_id TEXT NOT NULL,
+    discord_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (room_id, discord_user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS entitlement_notifications (
+    entitlement_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    PRIMARY KEY (entitlement_id, kind)
+  );
 `);
+
+function ensureColumn(table: string, column: string, definition: string): void {
+  const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((item) => item.name === column)) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+ensureColumn('rooms', 'notify_join_leave', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('rooms', 'password_hash', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('rooms', 'password_salt', "TEXT NOT NULL DEFAULT ''");
+sqlite.prepare('UPDATE products SET duration_days = 30 WHERE duration_days <= 0').run();
 
 const now = () => new Date().toISOString();
 const id = () => crypto.randomUUID();
@@ -144,11 +169,24 @@ function parseJson<T>(value: string, fallback: T): T {
   }
 }
 
+function normalizeCreatorChannels(value: string): CreatorChannelConfig[] {
+  const rows = parseJson<Array<Record<string, unknown>>>(value || '[]', []);
+  return rows.map((row): CreatorChannelConfig => ({
+    channelId: String(row.channelId || ''),
+    label: String(row.label || 'Tạo phòng'),
+    mode: row.mode === 'editable' || row.mode === 'premium' ? 'editable' : 'basic',
+    ...(row.categoryId ? { categoryId: String(row.categoryId) } : {}),
+    ...(row.allowedRoleId ? { allowedRoleId: String(row.allowedRoleId) } : {}),
+    notifyJoinLeave: Boolean(row.notifyJoinLeave),
+    autoTransferOwner: row.autoTransferOwner !== false,
+  })).filter((row) => row.channelId);
+}
+
 function rowToSettings(row: Record<string, unknown>): GuildSettings {
   return {
     guildId: String(row.guild_id),
     guildName: String(row.guild_name || ''),
-    creatorChannels: parseJson<CreatorChannelConfig[]>(String(row.creator_channels_json || '[]'), []),
+    creatorChannels: normalizeCreatorChannels(String(row.creator_channels_json || '[]')),
     premiumRoleId: String(row.premium_role_id || ''),
     controlChannelId: String(row.control_channel_id || ''),
     paymentPanelChannelId: String(row.payment_panel_channel_id || ''),
@@ -186,9 +224,12 @@ function rowToRoom(row: Record<string, unknown>): Room {
     channelId: String(row.channel_id),
     ownerId: String(row.owner_id),
     ownerTag: String(row.owner_tag),
-    mode: String(row.mode) === 'premium' ? 'premium' : 'free',
+    mode: String(row.mode) === 'editable' || String(row.mode) === 'premium' ? 'editable' : 'basic',
     creatorChannelId: String(row.creator_channel_id),
     controlMessageId: String(row.control_message_id || ''),
+    notifyJoinLeave: Boolean(row.notify_join_leave),
+    passwordHash: String(row.password_hash || ''),
+    passwordSalt: String(row.password_salt || ''),
     createdAt: String(row.created_at),
   };
 }
@@ -212,6 +253,21 @@ function rowToPayment(row: Record<string, unknown>): Payment {
     checkoutUrl: String(row.checkout_url || ''),
     note: String(row.note || ''),
     paidAt: String(row.paid_at || ''),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function rowToEntitlement(row: Record<string, unknown>): Entitlement {
+  return {
+    id: String(row.id),
+    guildId: String(row.guild_id),
+    discordUserId: String(row.discord_user_id),
+    productId: String(row.product_id || ''),
+    roleId: String(row.role_id || ''),
+    paymentId: String(row.payment_id),
+    status: String(row.status) as Entitlement['status'],
+    expiresAt: String(row.expires_at || ''),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -299,17 +355,17 @@ export const store = {
     const timestamp = now();
     const roomId = id();
     sqlite.prepare(`
-      INSERT INTO rooms (id, guild_id, channel_id, owner_id, owner_tag, mode, creator_channel_id, control_message_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(roomId, input.guildId, input.channelId, input.ownerId, input.ownerTag, input.mode, input.creatorChannelId, input.controlMessageId, timestamp);
+      INSERT INTO rooms (id, guild_id, channel_id, owner_id, owner_tag, mode, creator_channel_id, control_message_id, notify_join_leave, password_hash, password_salt, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(roomId, input.guildId, input.channelId, input.ownerId, input.ownerTag, input.mode, input.creatorChannelId, input.controlMessageId, input.notifyJoinLeave ? 1 : 0, input.passwordHash, input.passwordSalt, timestamp);
     return this.getRoomByChannel(input.channelId)!;
   },
 
-  updateRoom(channelId: string, patch: Partial<Pick<Room, 'controlMessageId' | 'ownerId' | 'ownerTag' | 'mode'>>): Room | undefined {
+  updateRoom(channelId: string, patch: Partial<Pick<Room, 'controlMessageId' | 'ownerId' | 'ownerTag' | 'mode' | 'notifyJoinLeave' | 'passwordHash' | 'passwordSalt'>>): Room | undefined {
     const current = this.getRoomByChannel(channelId);
     if (!current) return undefined;
     const next = { ...current, ...patch };
-    sqlite.prepare('UPDATE rooms SET owner_id = ?, owner_tag = ?, mode = ?, control_message_id = ? WHERE channel_id = ?').run(next.ownerId, next.ownerTag, next.mode, next.controlMessageId, channelId);
+    sqlite.prepare('UPDATE rooms SET owner_id = ?, owner_tag = ?, mode = ?, control_message_id = ?, notify_join_leave = ?, password_hash = ?, password_salt = ? WHERE channel_id = ?').run(next.ownerId, next.ownerTag, next.mode, next.controlMessageId, next.notifyJoinLeave ? 1 : 0, next.passwordHash, next.passwordSalt, channelId);
     return this.getRoomByChannel(channelId);
   },
 
@@ -323,11 +379,38 @@ export const store = {
     return row ? rowToRoom(row) : undefined;
   },
 
+  getRoomByOwnerAndCreator(guildId: string, ownerId: string, creatorChannelId: string): Room | undefined {
+    const row = sqlite.prepare('SELECT * FROM rooms WHERE guild_id = ? AND owner_id = ? AND creator_channel_id = ? ORDER BY created_at ASC LIMIT 1').get(guildId, ownerId, creatorChannelId) as Record<string, unknown> | undefined;
+    return row ? rowToRoom(row) : undefined;
+  },
+
+  listRoomsByOwner(guildId: string, ownerId: string): Room[] {
+    return (sqlite.prepare('SELECT * FROM rooms WHERE guild_id = ? AND owner_id = ? ORDER BY created_at ASC').all(guildId, ownerId) as Record<string, unknown>[]).map(rowToRoom);
+  },
+
   listRooms(guildId: string): Room[] {
     return (sqlite.prepare('SELECT * FROM rooms WHERE guild_id = ? ORDER BY created_at DESC').all(guildId) as Record<string, unknown>[]).map(rowToRoom);
   },
 
+  grantRoomAccess(roomId: string, userId: string): void {
+    sqlite.prepare('INSERT INTO room_access (room_id, discord_user_id, created_at) VALUES (?, ?, ?) ON CONFLICT(room_id, discord_user_id) DO UPDATE SET created_at = excluded.created_at').run(roomId, userId, now());
+  },
+
+  hasRoomAccess(roomId: string, userId: string): boolean {
+    return Boolean(sqlite.prepare('SELECT 1 FROM room_access WHERE room_id = ? AND discord_user_id = ?').get(roomId, userId));
+  },
+
+  revokeRoomAccess(roomId: string, userId: string): void {
+    sqlite.prepare('DELETE FROM room_access WHERE room_id = ? AND discord_user_id = ?').run(roomId, userId);
+  },
+
+  clearRoomAccess(roomId: string): void {
+    sqlite.prepare('DELETE FROM room_access WHERE room_id = ?').run(roomId);
+  },
+
   deleteRoomByChannel(channelId: string): void {
+    const room = this.getRoomByChannel(channelId);
+    if (room) sqlite.prepare('DELETE FROM room_access WHERE room_id = ?').run(room.id);
     sqlite.prepare('DELETE FROM rooms WHERE channel_id = ?').run(channelId);
   },
 
@@ -409,28 +492,19 @@ export const store = {
   },
 
   getEntitlement(guildId: string, userId: string, productId = ''): Entitlement | undefined {
+    const timestamp = now();
     const query = productId
-      ? 'SELECT * FROM entitlements WHERE guild_id = ? AND discord_user_id = ? AND product_id = ? AND status = \'active\' ORDER BY created_at DESC LIMIT 1'
-      : 'SELECT * FROM entitlements WHERE guild_id = ? AND discord_user_id = ? AND status = \'active\' ORDER BY created_at DESC LIMIT 1';
-    const row = (productId ? sqlite.prepare(query).get(guildId, userId, productId) : sqlite.prepare(query).get(guildId, userId)) as Record<string, unknown> | undefined;
-    if (!row) return undefined;
-    const expiresAt = String(row.expires_at || '');
-    if (expiresAt && new Date(expiresAt).getTime() <= Date.now()) {
-      sqlite.prepare('UPDATE entitlements SET status = \'expired\', updated_at = ? WHERE id = ?').run(now(), row.id);
-      return undefined;
-    }
-    return {
-      id: String(row.id), guildId: String(row.guild_id), discordUserId: String(row.discord_user_id), productId: String(row.product_id || ''), roleId: String(row.role_id), paymentId: String(row.payment_id), status: String(row.status) as Entitlement['status'], expiresAt, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
-    };
+      ? "SELECT * FROM entitlements WHERE guild_id = ? AND discord_user_id = ? AND product_id = ? AND status = 'active' AND (expires_at = '' OR expires_at > ?) ORDER BY created_at DESC LIMIT 1"
+      : "SELECT * FROM entitlements WHERE guild_id = ? AND discord_user_id = ? AND status = 'active' AND (expires_at = '' OR expires_at > ?) ORDER BY CASE WHEN expires_at = '' THEN 1 ELSE 0 END DESC, expires_at DESC, created_at DESC LIMIT 1";
+    const row = (productId ? sqlite.prepare(query).get(guildId, userId, productId, timestamp) : sqlite.prepare(query).get(guildId, userId, timestamp)) as Record<string, unknown> | undefined;
+    return row ? rowToEntitlement(row) : undefined;
   },
 
   listEntitlements(guildId: string, userId?: string): Entitlement[] {
     const rows = (userId
       ? sqlite.prepare('SELECT * FROM entitlements WHERE guild_id = ? AND discord_user_id = ? ORDER BY created_at DESC').all(guildId, userId)
       : sqlite.prepare('SELECT * FROM entitlements WHERE guild_id = ? ORDER BY created_at DESC').all(guildId)) as Record<string, unknown>[];
-    return rows.map((row) => ({
-      id: String(row.id), guildId: String(row.guild_id), discordUserId: String(row.discord_user_id), productId: String(row.product_id || ''), roleId: String(row.role_id), paymentId: String(row.payment_id), status: String(row.status) as Entitlement['status'], expiresAt: String(row.expires_at || ''), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
-    }));
+    return rows.map(rowToEntitlement);
   },
 
   upsertEntitlement(input: { guildId: string; discordUserId: string; productId: string; roleId: string; paymentId: string; expiresAt: string }): Entitlement {
@@ -438,6 +512,7 @@ export const store = {
     const timestamp = now();
     if (existing) {
       sqlite.prepare('UPDATE entitlements SET role_id = ?, payment_id = ?, status = \'active\', expires_at = ?, updated_at = ? WHERE id = ?').run(input.roleId, input.paymentId, input.expiresAt, timestamp, existing.id);
+      sqlite.prepare('DELETE FROM entitlement_notifications WHERE entitlement_id = ?').run(existing.id);
       return this.listEntitlements(input.guildId, input.discordUserId).find((item) => item.id === existing.id)!;
     }
     const entitlementId = id();
@@ -454,13 +529,27 @@ export const store = {
     return Boolean(row);
   },
 
+  listEntitlementsNeedingReminder(withinDays = 3): Entitlement[] {
+    const start = now();
+    const end = new Date(Date.now() + Math.max(1, withinDays) * 86_400_000).toISOString();
+    const rows = sqlite.prepare(`
+      SELECT e.* FROM entitlements e
+      LEFT JOIN entitlement_notifications n ON n.entitlement_id = e.id AND n.kind = 'renewal_3d'
+      WHERE e.status = 'active' AND e.expires_at <> '' AND e.expires_at > ? AND e.expires_at <= ? AND n.entitlement_id IS NULL
+      ORDER BY e.expires_at ASC
+    `).all(start, end) as Record<string, unknown>[];
+    return rows.map(rowToEntitlement);
+  },
+
+  markEntitlementReminder(entitlementId: string, kind = 'renewal_3d'): void {
+    sqlite.prepare('INSERT OR IGNORE INTO entitlement_notifications (entitlement_id, kind, sent_at) VALUES (?, ?, ?)').run(entitlementId, kind, now());
+  },
+
   expireDueEntitlements(): Entitlement[] {
     const timestamp = now();
     const rows = sqlite.prepare("SELECT * FROM entitlements WHERE status = 'active' AND expires_at <> '' AND expires_at <= ?").all(timestamp) as Record<string, unknown>[];
     if (rows.length) sqlite.prepare("UPDATE entitlements SET status = 'expired', updated_at = ? WHERE status = 'active' AND expires_at <> '' AND expires_at <= ?").run(timestamp, timestamp);
-    return rows.map((row) => ({
-      id: String(row.id), guildId: String(row.guild_id), discordUserId: String(row.discord_user_id), productId: String(row.product_id || ''), roleId: String(row.role_id), paymentId: String(row.payment_id), status: 'expired', expiresAt: String(row.expires_at || ''), createdAt: String(row.created_at), updatedAt: timestamp,
-    }));
+    return rows.map((row) => ({ ...rowToEntitlement(row), status: 'expired', updatedAt: timestamp }));
   },
 
   getStats(guildId: string): { paidTotalVnd: number; paidCount: number; pendingCount: number; donorCount: number; activeRooms: number } {

@@ -30,8 +30,9 @@ export const config = {
     accountNumber: process.env.SEPAY_ACCOUNT_NUMBER || '',
     accountName: process.env.SEPAY_ACCOUNT_NAME || '',
     staticQrUrl: process.env.SEPAY_STATIC_QR_URL || '',
-    qrBaseUrl: process.env.SEPAY_QR_BASE_URL || 'https://vietqr.app/img',
-    accessToken: process.env.SEPAY_ACCESS_TOKEN || '',
+    qrBaseUrl: textFromEnv('SEPAY_QR_BASE_URL', 'https://vietqr.app/img'),
+    apiToken: textFromEnv('SEPAY_API_TOKEN', textFromEnv('SEPAY_ACCESS_TOKEN')),
+    apiBaseUrl: textFromEnv('SEPAY_API_BASE_URL', 'https://userapi.sepay.vn/v2').replace(/\/$/, ''),
   },
   sgf: {
     integrationSecret: process.env.SGF_INTEGRATION_SECRET || '',
@@ -49,7 +50,7 @@ export function assertProductionConfig(): void {
   if (!config.discord.token) missing.push('DISCORD_TOKEN');
   if (!config.discord.clientId) missing.push('DISCORD_CLIENT_ID');
   if (!config.discord.clientSecret) missing.push('DISCORD_CLIENT_SECRET');
-  if (!config.sepay.webhookApiKey) missing.push('SEPAY_WEBHOOK_API_KEY');
+  if (!config.sepay.webhookApiKey && !config.sepay.apiToken) missing.push('SEPAY_WEBHOOK_API_KEY or SEPAY_API_TOKEN');
   if (!config.sgf.integrationSecret) missing.push('SGF_INTEGRATION_SECRET');
   if (config.sessionSecret === 'dev-only-session-secret') missing.push('SESSION_SECRET');
   if (missing.length) throw new Error(`Missing production environment variables: ${missing.join(', ')}`);

@@ -1,4 +1,4 @@
-export type CreatorMode = 'free' | 'premium';
+export type CreatorMode = 'basic' | 'editable';
 export type PaymentType = 'product' | 'donation';
 export type PaymentStatus = 'pending' | 'paid' | 'expired' | 'cancelled';
 
@@ -7,6 +7,9 @@ export interface CreatorChannelConfig {
   label: string;
   mode: CreatorMode;
   categoryId?: string;
+  allowedRoleId?: string;
+  notifyJoinLeave?: boolean;
+  autoTransferOwner?: boolean;
 }
 
 export interface GuildSettings {
@@ -49,6 +52,9 @@ export interface Room {
   mode: CreatorMode;
   creatorChannelId: string;
   controlMessageId: string;
+  notifyJoinLeave: boolean;
+  passwordHash: string;
+  passwordSalt: string;
   createdAt: string;
 }
 

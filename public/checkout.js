@@ -6,7 +6,7 @@ const id = location.pathname.split('/').filter(Boolean).pop();
 async function api(url) { const response = await fetch(url, { credentials: 'same-origin' }); const data = await response.json().catch(() => ({})); if (!response.ok)
     throw new Error(data.message || data.error || `HTTP ${response.status}`); return data; }
 function showLogin() { $('#checkoutLogin').classList.remove('hidden'); $('#checkoutContent').classList.add('hidden'); $('#checkoutLoginLink').href = `/auth/discord?returnTo=${encodeURIComponent(location.pathname)}`; }
-function render(data) { const p = data.payment; const info = data.paymentInfo || {}; $('#checkoutLogin').classList.add('hidden'); $('#checkoutContent').classList.remove('hidden'); $('#paymentStatusPill').textContent = p.status.toUpperCase(); $('#paymentStatusPill').className = `pill ${p.status === 'paid' ? '' : p.status === 'pending' ? 'orange' : 'muted'}`; $('#checkoutStatus').textContent = p.status === 'paid' ? 'Thanh toán thành công. Role sẽ được cấp trong Discord.' : p.status === 'pending' ? 'Quét QR hoặc chuyển khoản theo thông tin bên dưới.' : 'Đơn không còn hoạt động.'; $('#paymentNote').textContent = p.note || (p.type === 'donation' ? 'Donate SGF' : 'Premium'); $('#paymentAmount').textContent = vnd(p.paidAmountVnd || p.expectedAmountVnd); $('#paymentCode').textContent = p.orderCode; $('#paymentBank').textContent = info.bankCode || '—'; $('#paymentAccount').textContent = info.accountNumber || '—'; $('#paymentAccountName').textContent = info.accountName || '—'; if (p.qrUrl) {
+function render(data) { const p = data.payment; const info = data.paymentInfo || {}; const reconciliation = data.reconciliation || {}; $('#checkoutLogin').classList.add('hidden'); $('#checkoutContent').classList.remove('hidden'); $('#paymentStatusPill').textContent = p.status.toUpperCase(); $('#paymentStatusPill').className = `pill ${p.status === 'paid' ? '' : p.status === 'pending' ? 'orange' : 'muted'}`; $('#checkoutStatus').textContent = p.status === 'paid' ? 'Thanh toán thành công. Role sẽ được cấp trong Discord.' : p.status === 'pending' ? 'Quét QR hoặc chuyển khoản theo thông tin bên dưới.' : 'Đơn không còn hoạt động.'; $('#paymentNote').textContent = p.note || (p.type === 'donation' ? 'Donate SGF' : 'Premium'); $('#paymentAmount').textContent = vnd(p.paidAmountVnd || p.expectedAmountVnd); $('#paymentCode').textContent = p.orderCode; $('#paymentBank').textContent = info.bankCode || '—'; $('#paymentAccount').textContent = info.accountNumber || '—'; $('#paymentAccountName').textContent = info.accountName || '—'; if (p.qrUrl) {
     $('#qrImage').src = p.qrUrl;
     $('#qrImage').classList.remove('hidden');
     $('#noQr').classList.add('hidden');
@@ -14,7 +14,7 @@ function render(data) { const p = data.payment; const info = data.paymentInfo ||
 else {
     $('#qrImage').classList.add('hidden');
     $('#noQr').classList.remove('hidden');
-} $('#pollingText').textContent = p.status === 'paid' ? '✓ Đã nhận webhook từ SePay.' : 'Đang chờ webhook SePay…'; }
+} $('#pollingText').textContent = p.status === 'paid' ? '✓ Đã xác nhận giao dịch qua SePay.' : reconciliation.configured ? 'Đang chờ webhook và đối soát SePay API v2…' : 'Đang chờ webhook SePay…'; }
 async function init() { try {
     const session = await api('/api/session');
     if (!session.authenticated) {

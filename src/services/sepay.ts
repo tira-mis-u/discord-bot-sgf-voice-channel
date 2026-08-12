@@ -27,13 +27,10 @@ export function buildPaymentQr(settings: GuildSettings, amount: number, orderCod
 
 export function verifySepayWebhook(headers: Record<string, unknown>): boolean {
   if (!config.sepay.webhookApiKey) return false;
-  const authorization = String(headers.authorization || headers.Authorization || '');
-  const apiKeyHeader = String(headers['x-api-key'] || '');
-  const candidates = [authorization, apiKeyHeader];
-  return candidates.some((candidate) => {
-    const expected = candidate.startsWith('Apikey ') ? `Apikey ${config.sepay.webhookApiKey}` : config.sepay.webhookApiKey;
-    return candidate.length === expected.length && crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(expected));
-  });
+  const authorization = String(headers.authorization || headers.Authorization || '').trim();
+  const apiKeyHeader = String(headers['x-api-key'] || '').trim();
+  const suppliedKeys = [authorization.replace(/^Apikey\s+/i, ''), apiKeyHeader].filter(Boolean);
+  return suppliedKeys.some((candidate) => candidate.length === config.sepay.webhookApiKey.length && crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(config.sepay.webhookApiKey)));
 }
 
 export function normalizeText(value: unknown): string {

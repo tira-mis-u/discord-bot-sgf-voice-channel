@@ -5,13 +5,15 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import { z } from 'zod';
+import { ChannelType } from 'discord.js';
 import { config } from './config.js';
 import { store } from './db.js';
 import { SgfBot } from './bot.js';
 import type { AuthSession, OAuthGuild, SessionUser } from './types.js';
 import { clampText, escapeHtml, isDiscordAdmin, parseVnd } from './utils.js';
-import { createDonationPayment, createProductPayment } from './services/payment-service.js';
+import { createDonationPayment, createProductPayment, reconcilePendingPayment } from './services/payment-service.js';
 import { verifySepayWebhook } from './services/sepay.js';
+import { getSepayApiStatus, isSepayApiConfigured } from './services/sepay-api.js';
 
 const publicDir = path.resolve('public');
 const app = express();
@@ -220,6 +222,8 @@ app.get('/api/runtime', (_req, res) => {
     ...bot.getRuntimeStatus(),
     publicUrl: config.publicUrl,
     sepayWebhookUrl: `${config.publicUrl}/api/payments/sepay/webhook`,
+    sepayWebhookConfigured: Boolean(config.sepay.webhookApiKey),
+    sepayApiConfigured: isSepayApiConfigured(),
     inviteUrl,
   });
 });
@@ -241,22 +245,36 @@ app.get('/api/guilds/:guildId', requireAuth, (req: AuthRequest, res: Response) =
   const guild = sessionGuild(req.authSession, guildId);
   const settings = store.getSettings(guildId, guild?.name || '');
   const canManage = canManageGuild(req, guildId);
+  const entitlement = req.authSession ? store.getEntitlement(guildId, req.authSession.user.id) : undefined;
   res.json({
     guild: guild || { id: guildId, name: settings.guildName },
     canManage,
     bot: bot.getGuildAccess(guildId),
+    subscription: { premium: Boolean(entitlement), expiresAt: entitlement?.expiresAt || '', freeEditableLimit: 1 },
     settings,
     products: store.listProducts(guildId, !canManage),
     stats: canManage ? store.getStats(guildId) : { paidTotalVnd: 0, paidCount: 0, pendingCount: 0, donorCount: 0, activeRooms: 0 },
-    rooms: canManage ? store.listRooms(guildId) : [],
-    sepay: { webhookConfigured: Boolean(config.sepay.webhookApiKey), dynamicQrConfigured: Boolean(settings.bankCode || config.sepay.bankCode) && Boolean(settings.bankAccountNumber || config.sepay.accountNumber), staticQrConfigured: Boolean(settings.staticQrUrl || config.sepay.staticQrUrl), webhookUrl: `${config.publicUrl}/api/payments/sepay/webhook` },
+    rooms: canManage ? store.listRooms(guildId).map(({ passwordHash, passwordSalt: _passwordSalt, ...room }) => ({ ...room, passwordEnabled: Boolean(passwordHash) })) : [],
+    sepay: { webhookConfigured: Boolean(config.sepay.webhookApiKey), apiTokenConfigured: isSepayApiConfigured(), apiBaseUrl: config.sepay.apiBaseUrl, dynamicQrConfigured: Boolean(settings.bankCode || config.sepay.bankCode) && Boolean(settings.bankAccountNumber || config.sepay.accountNumber), staticQrConfigured: Boolean(settings.staticQrUrl || config.sepay.staticQrUrl), webhookUrl: `${config.publicUrl}/api/payments/sepay/webhook` },
     integration: { paymentsEndpoint: `${config.publicUrl}/api/integrations/sgf/payments`, entitlementsEndpoint: `${config.publicUrl}/api/integrations/sgf/entitlements`, eventsConfigured: Boolean(config.sgf.eventsWebhookUrl) },
   });
 });
 
+const creatorModeInput = z.enum(['basic', 'editable', 'free', 'premium']).transform((value) => value === 'editable' || value === 'premium' ? 'editable' as const : 'basic' as const);
+
+const creatorChannelInput = z.object({
+  channelId: z.string().min(1).max(32),
+  label: z.string().max(100),
+  mode: creatorModeInput,
+  categoryId: z.string().max(32).optional(),
+  allowedRoleId: z.string().max(32).optional(),
+  notifyJoinLeave: z.boolean().optional().default(false),
+  autoTransferOwner: z.boolean().optional().default(true),
+});
+
 const settingsInput = z.object({
   guildName: z.string().max(100).optional(),
-  creatorChannels: z.array(z.object({ channelId: z.string().min(1).max(32), label: z.string().max(80), mode: z.enum(['free', 'premium']), categoryId: z.string().max(32).optional() })).max(30).optional(),
+  creatorChannels: z.array(creatorChannelInput).max(30).optional(),
   premiumRoleId: z.string().max(32).optional(),
   controlChannelId: z.string().max(32).optional(),
   paymentPanelChannelId: z.string().max(32).optional(),
@@ -272,7 +290,14 @@ const settingsInput = z.object({
 app.post('/api/guilds/:guildId/creator-channels', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
-  const input = z.object({ label: z.string().min(1).max(100), mode: z.enum(['free', 'premium']), categoryId: z.string().max(32).optional() }).safeParse(req.body);
+  const input = z.object({
+    label: z.string().min(1).max(100),
+    mode: creatorModeInput,
+    categoryId: z.string().max(32).optional(),
+    allowedRoleId: z.string().max(32).optional(),
+    notifyJoinLeave: z.boolean().optional().default(false),
+    autoTransferOwner: z.boolean().optional().default(true),
+  }).safeParse(req.body);
   if (!input.success) {
     res.status(400).json({ error: 'INVALID_CREATOR_CHANNEL', details: input.error.flatten() });
     return;
@@ -298,6 +323,30 @@ app.put('/api/guilds/:guildId/settings', requireAuth, (req: AuthRequest, res: Re
     res.status(400).json({ error: 'INVALID_SETTINGS', details: parsed.error.flatten() });
     return;
   }
+  const discordGuild = bot.client.guilds.cache.get(guildId);
+  if (parsed.data.creatorChannels && discordGuild) {
+    const channelIds = new Set<string>();
+    for (const creator of parsed.data.creatorChannels) {
+      const channel = discordGuild.channels.cache.get(creator.channelId);
+      if (!channel || channel.type !== ChannelType.GuildVoice) {
+        res.status(400).json({ error: 'INVALID_CREATOR_CHANNEL', message: `Channel ID ${creator.channelId} không phải voice channel hoặc bot không nhìn thấy.` });
+        return;
+      }
+      if (channelIds.has(creator.channelId)) {
+        res.status(400).json({ error: 'DUPLICATE_CREATOR_CHANNEL', message: `Voice channel ${creator.channelId} đang bị khai báo trùng.` });
+        return;
+      }
+      channelIds.add(creator.channelId);
+      if (creator.categoryId && discordGuild.channels.cache.get(creator.categoryId)?.type !== ChannelType.GuildCategory) {
+        res.status(400).json({ error: 'INVALID_CATEGORY', message: `Category ID ${creator.categoryId} không hợp lệ.` });
+        return;
+      }
+      if (creator.allowedRoleId && !discordGuild.roles.cache.has(creator.allowedRoleId)) {
+        res.status(400).json({ error: 'INVALID_ALLOWED_ROLE', message: `Role ID ${creator.allowedRoleId} không tồn tại.` });
+        return;
+      }
+    }
+  }
   const guild = sessionGuild(req.authSession, guildId);
   const patch = { ...parsed.data, ...(guild?.name ? { guildName: guild.name } : {}) };
   const settings = store.updateSettings(guildId, patch);
@@ -309,7 +358,7 @@ const productInput = z.object({
   description: z.string().max(300).default(''),
   priceVnd: z.number().int().min(1000).max(500000000),
   roleId: z.string().max(32).default(''),
-  durationDays: z.number().int().min(0).max(3650).default(30),
+  durationDays: z.number().int().min(1).max(3650).default(30),
   active: z.boolean().default(true),
   sortOrder: z.number().int().min(0).max(999).default(0),
 });
@@ -356,6 +405,13 @@ app.delete('/api/guilds/:guildId/products/:productId', requireAuth, (req: AuthRe
   res.json({ ok: true });
 });
 
+app.get('/api/guilds/:guildId/sepay-status', requireAuth, async (req: AuthRequest, res: Response) => {
+  const guildId = String(req.params.guildId);
+  if (!requireGuildAdmin(req, res, guildId)) return;
+  const status = await getSepayApiStatus(String(req.query.refresh || '') === '1');
+  res.json({ status });
+});
+
 app.get('/api/guilds/:guildId/payments', requireAuth, (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
@@ -366,22 +422,62 @@ app.get('/api/guilds/:guildId/payments', requireAuth, (req: AuthRequest, res: Re
 app.get('/api/guilds/:guildId/rooms', requireAuth, (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
-  res.json({ rooms: store.listRooms(guildId) });
+  res.json({ rooms: store.listRooms(guildId).map(({ passwordHash: _passwordHash, passwordSalt: _passwordSalt, ...room }) => ({ ...room, passwordEnabled: Boolean(_passwordHash) })) });
+});
+
+app.get('/api/guilds/:guildId/live-rooms', requireAuth, async (req: AuthRequest, res: Response) => {
+  const guildId = String(req.params.guildId);
+  if (!requireGuildAccess(req, res, guildId)) return;
+  try {
+    const admin = canManageGuild(req, guildId);
+    const rooms = await bot.listLiveRooms(guildId, req.authSession!.user.id, admin);
+    const entitlement = store.getEntitlement(guildId, req.authSession!.user.id);
+    res.json({ rooms, admin, subscription: { premium: Boolean(entitlement), expiresAt: entitlement?.expiresAt || '', freeEditableLimit: 1 } });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Không đọc được phòng voice.' });
+  }
+});
+
+const roomActionInput = z.object({
+  action: z.enum(['rename', 'limit', 'lock', 'hide', 'password', 'notifications', 'invite', 'kick', 'transfer', 'delete']),
+  value: z.union([z.string().max(100), z.number(), z.boolean()]).optional(),
+  targetUserId: z.string().max(32).optional(),
+});
+
+app.post('/api/guilds/:guildId/live-rooms/:channelId/action', requireAuth, async (req: AuthRequest, res: Response) => {
+  const guildId = String(req.params.guildId);
+  if (!requireGuildAccess(req, res, guildId)) return;
+  const parsed = roomActionInput.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'INVALID_ROOM_ACTION', details: parsed.error.flatten() });
+    return;
+  }
+  try {
+    const message = await bot.manageRoom({
+      guildId,
+      actorId: req.authSession!.user.id,
+      admin: canManageGuild(req, guildId),
+      channelId: String(req.params.channelId),
+      ...parsed.data,
+    });
+    res.json({ ok: true, message });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Không thực hiện được thao tác phòng.' });
+  }
 });
 
 app.get('/api/guilds/:guildId/members', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
   try {
-    const settings = store.getSettings(guildId);
     const paidSummary = store.getPaidUserSummary(guildId);
     const entitlements = store.listEntitlements(guildId);
-    const activeByUser = new Set(entitlements.filter((item) => item.status === 'active').map((item) => item.discordUserId));
-    const members = await bot.listGuildMembers(guildId);
+    const activeByUser = new Set(entitlements.filter((item) => item.status === 'active' && (!item.expiresAt || new Date(item.expiresAt).getTime() > Date.now())).map((item) => item.discordUserId));
+    const members = await bot.listGuildMembers(guildId, String(req.query.refresh || '') === '1');
     res.json({
       members: members.map((member) => {
         const payment = paidSummary[member.id] || { paidCount: 0, paidTotalVnd: 0, lastPaidAt: '' };
-        const premium = activeByUser.has(member.id) || Boolean(settings.premiumRoleId && member.roleIds.includes(settings.premiumRoleId));
+        const premium = activeByUser.has(member.id);
         return { ...member, premium, paid: payment.paidCount > 0, payment };
       }),
     });
@@ -439,8 +535,8 @@ app.post('/api/public/guilds/:guildId/donation', requireAuth, (req: AuthRequest,
   }
 });
 
-app.get('/api/public/payments/:paymentId', requireAuth, (req: AuthRequest, res: Response) => {
-  const payment = store.getPayment(String(req.params.paymentId));
+app.get('/api/public/payments/:paymentId', requireAuth, async (req: AuthRequest, res: Response) => {
+  let payment = store.getPayment(String(req.params.paymentId));
   if (!payment) {
     res.status(404).json({ error: 'PAYMENT_NOT_FOUND' });
     return;
@@ -451,8 +547,12 @@ app.get('/api/public/payments/:paymentId', requireAuth, (req: AuthRequest, res: 
     res.status(403).json({ error: 'PAYMENT_FORBIDDEN' });
     return;
   }
+  const reconciliation = payment.status === 'pending'
+    ? await reconcilePendingPayment(bot.client, payment.id)
+    : { configured: isSepayApiConfigured(), checked: false, matched: payment.status === 'paid', message: '', checkedAt: '' };
+  payment = store.getPayment(payment.id) || payment;
   const settings = store.getSettings(payment.guildId);
-  res.json({ payment, product: payment.productId ? store.getProduct(payment.productId) : undefined, paymentInfo: { bankCode: settings.bankCode || config.sepay.bankCode, accountNumber: settings.bankAccountNumber || config.sepay.accountNumber, accountName: settings.bankAccountName || config.sepay.accountName } });
+  res.json({ payment, reconciliation, product: payment.productId ? store.getProduct(payment.productId) : undefined, paymentInfo: { bankCode: settings.bankCode || config.sepay.bankCode, accountNumber: settings.bankAccountNumber || config.sepay.accountNumber, accountName: settings.bankAccountName || config.sepay.accountName } });
 });
 
 app.post('/api/payments/sepay/webhook', async (req: Request, res: Response) => {

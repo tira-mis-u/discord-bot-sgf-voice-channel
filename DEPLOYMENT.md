@@ -96,10 +96,13 @@ Trong Discord Developer Portal, thêm đúng redirect URI HTTPS đó.
 2. Vào SePay → Webhooks → tạo webhook mới.
 3. Chọn bank account dùng để nhận tiền.
 4. Chọn `In_only`, JSON request, API key auth.
-5. Paste API key vào `.env` rồi restart service.
-6. Dùng payment panel tạo một đơn nhỏ; chuyển đúng mã; kiểm tra log + role + ledger.
+5. Paste webhook API key vào `SEPAY_WEBHOOK_API_KEY` trong `.env`.
+6. Vào Company Settings → API Access, tạo API v2 token rồi lưu vào `SEPAY_API_TOKEN`.
+7. Dùng `SEPAY_API_BASE_URL=https://userapi.sepay.vn/v2` cho production hoặc `https://userapi-sandbox.sepay.vn/v2` cho test mode.
+8. Restart service, vào Dashboard → **Tích hợp & nhận tiền** → **Kiểm tra API v2**.
+9. Dùng payment panel tạo một đơn nhỏ; chuyển đúng mã; kiểm tra webhook/API reconciliation + role + ledger.
 
-Webhook endpoint phải public HTTPS và trả HTTP 2xx nhanh. Code đã chống transaction trùng và lưu unmatched transaction để debug.
+Webhook endpoint phải public HTTPS và trả HTTP 2xx nhanh. Webhook xử lý realtime; SePay API v2 dùng Bearer token để đối soát đơn pending khi webhook chậm. Code chống transaction trùng và lưu unmatched transaction để debug. Không expose API token cho frontend.
 
 ## Dùng domain SGF chính
 

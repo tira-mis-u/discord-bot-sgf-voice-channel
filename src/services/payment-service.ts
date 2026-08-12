@@ -4,6 +4,7 @@ import { store } from '../db.js';
 import type { Payment, Product, SepayWebhookPayload } from '../types.js';
 import { formatVnd } from '../utils.js';
 import { buildPaymentQr, createOrderCode, extractOrderCode, isIncoming, normalizeText, webhookAmount, webhookTransactionId } from './sepay.js';
+import { findSepayTransactions, isSepayApiConfigured, transactionToWebhookPayload } from './sepay-api.js';
 
 export interface PaymentCreationResult {
   payment: Payment;
@@ -75,7 +76,7 @@ export function createDonationPayment(input: { guildId: string; userId: string; 
   return { payment: responsePayment, qrDynamic: details.qr.dynamic, bankCode: details.bankCode, accountNumber: details.accountNumber, accountName: details.accountName };
 }
 
-function calculateExpiry(durationDays: number, previousExpiry = ''): string {
+export function calculateExpiry(durationDays: number, previousExpiry = ''): string {
   if (!durationDays || durationDays <= 0) return '';
   const start = previousExpiry && new Date(previousExpiry).getTime() > Date.now() ? new Date(previousExpiry) : new Date();
   start.setDate(start.getDate() + durationDays);
@@ -83,22 +84,23 @@ function calculateExpiry(durationDays: number, previousExpiry = ''): string {
 }
 
 async function grantRole(client: Client, payment: Payment, product: Product): Promise<{ granted: boolean; message: string }> {
-  const guild = await client.guilds.fetch(payment.guildId).catch(() => null);
-  if (!guild) return { granted: false, message: 'Bot chưa ở trong server.' };
   const settings = store.getSettings(payment.guildId);
   const roleId = product.roleId || settings.premiumRoleId;
-  if (!roleId) return { granted: false, message: 'Admin chưa cấu hình role Premium.' };
-  const member = await guild.members.fetch(payment.discordUserId).catch(() => null) as GuildMember | null;
-  if (!member) return { granted: false, message: 'Không tìm thấy thành viên trong server.' };
-  const role = await guild.roles.fetch(roleId).catch(() => null);
-  if (!role) return { granted: false, message: 'Role Premium không tồn tại hoặc bot không nhìn thấy role.' };
-  const botMember = guild.members.me || await guild.members.fetch(client.user?.id || '').catch(() => null);
-  if (!botMember) return { granted: false, message: 'Không xác định được member của bot trong server.' };
-  if (role.position >= botMember.roles.highest.position) return { granted: false, message: 'Role Premium đang cao hơn role của bot.' };
-  await member.roles.add(role, `SGF payment ${payment.orderCode}`);
   const existingEntitlement = store.getEntitlement(payment.guildId, payment.discordUserId, product.id);
-  store.upsertEntitlement({ guildId: payment.guildId, discordUserId: payment.discordUserId, productId: product.id, roleId: role.id, paymentId: payment.id, expiresAt: calculateExpiry(product.durationDays, existingEntitlement?.expiresAt) });
-  return { granted: true, message: `Đã cấp role ${role.name}.` };
+  const expiresAt = calculateExpiry(product.durationDays, existingEntitlement?.expiresAt);
+  store.upsertEntitlement({ guildId: payment.guildId, discordUserId: payment.discordUserId, productId: product.id, roleId, paymentId: payment.id, expiresAt });
+
+  const guild = await client.guilds.fetch(payment.guildId).catch(() => null);
+  if (!guild) return { granted: true, message: 'Premium đã kích hoạt, nhưng bot hiện không truy cập được server để cấp role.' };
+  if (!roleId) return { granted: true, message: `Premium đã kích hoạt đến ${expiresAt ? new Date(expiresAt).toLocaleDateString('vi-VN') : 'vĩnh viễn'}.` };
+  const member = await guild.members.fetch(payment.discordUserId).catch(() => null) as GuildMember | null;
+  if (!member) return { granted: true, message: 'Premium đã kích hoạt, nhưng không tìm thấy member để cấp role.' };
+  const role = await guild.roles.fetch(roleId).catch(() => null);
+  if (!role) return { granted: true, message: 'Premium đã kích hoạt, nhưng role cấu hình không còn tồn tại.' };
+  const botMember = guild.members.me || await guild.members.fetch(client.user?.id || '').catch(() => null);
+  if (!botMember || role.position >= botMember.roles.highest.position) return { granted: true, message: 'Premium đã kích hoạt, nhưng bot chưa đủ quyền cấp role.' };
+  await member.roles.add(role, `SGF payment ${payment.orderCode}`);
+  return { granted: true, message: `Đã gia hạn Premium và cấp role ${role.name} đến ${expiresAt ? new Date(expiresAt).toLocaleDateString('vi-VN') : 'vĩnh viễn'}.` };
 }
 
 export async function settleSepayWebhook(client: Client, payload: SepayWebhookPayload): Promise<{ ok: boolean; matched: boolean; payment?: Payment; message: string }> {
@@ -140,6 +142,59 @@ export async function settleSepayWebhook(client: Client, payload: SepayWebhookPa
   }
   await notifySgf(paid);
   return { ok: true, matched: true, payment: paid, message };
+}
+
+export interface ReconciliationResult {
+  configured: boolean;
+  checked: boolean;
+  matched: boolean;
+  message: string;
+  checkedAt: string;
+}
+
+const reconciliationCache = new Map<string, { at: number; result: ReconciliationResult }>();
+const reconciliationInFlight = new Map<string, Promise<ReconciliationResult>>();
+
+export async function reconcilePendingPayment(client: Client, paymentId: string, force = false): Promise<ReconciliationResult> {
+  const payment = store.getPayment(paymentId);
+  const checkedAt = new Date().toISOString();
+  if (!isSepayApiConfigured()) return { configured: false, checked: false, matched: false, message: 'Chưa cấu hình SEPAY_API_TOKEN.', checkedAt };
+  if (!payment) return { configured: true, checked: false, matched: false, message: 'Không tìm thấy đơn thanh toán.', checkedAt };
+  if (payment.status !== 'pending') return { configured: true, checked: false, matched: payment.status === 'paid', message: `Đơn đang ở trạng thái ${payment.status}.`, checkedAt };
+
+  const cached = reconciliationCache.get(paymentId);
+  if (!force && cached && Date.now() - cached.at < 15_000) return cached.result;
+  const running = reconciliationInFlight.get(paymentId);
+  if (running) return running;
+
+  const task = (async () => {
+    try {
+      const settings = store.getSettings(payment.guildId);
+      const transactions = await findSepayTransactions({
+        orderCode: payment.orderCode,
+        expectedAmount: payment.expectedAmountVnd,
+        accountNumber: settings.bankAccountNumber || config.sepay.accountNumber,
+        createdAt: payment.createdAt,
+      });
+      for (const transaction of transactions) {
+        const result = await settleSepayWebhook(client, transactionToWebhookPayload(transaction));
+        if (result.matched) {
+          return { configured: true, checked: true, matched: true, message: `Đã đối soát bằng SePay API v2. ${result.message}`, checkedAt: new Date().toISOString() };
+        }
+      }
+      return { configured: true, checked: true, matched: false, message: 'SePay API chưa tìm thấy giao dịch khớp mã đơn và số tiền.', checkedAt: new Date().toISOString() };
+    } catch (error) {
+      return { configured: true, checked: true, matched: false, message: error instanceof Error ? error.message : 'Đối soát SePay API thất bại.', checkedAt: new Date().toISOString() };
+    }
+  })();
+  reconciliationInFlight.set(paymentId, task);
+  try {
+    const result = await task;
+    reconciliationCache.set(paymentId, { at: Date.now(), result });
+    return result;
+  } finally {
+    reconciliationInFlight.delete(paymentId);
+  }
 }
 
 async function notifySgf(payment: Payment): Promise<void> {
