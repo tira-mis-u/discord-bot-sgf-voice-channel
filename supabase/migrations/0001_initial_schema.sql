@@ -1,5 +1,3 @@
-begin;
-
 create table if not exists public.guild_settings (
   guild_id text primary key,
   guild_name text not null default '',
@@ -155,5 +153,3 @@ alter table public.room_access enable row level security;
 alter table public.entitlement_notifications enable row level security;
 
 revoke all on all tables in schema public from anon, authenticated;
-
-commit;

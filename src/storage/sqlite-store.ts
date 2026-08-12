@@ -159,6 +159,8 @@ function ensureColumn(table: string, column: string, definition: string): void {
 ensureColumn('rooms', 'notify_join_leave', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('rooms', 'password_hash', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('rooms', 'password_salt', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('entitlements', 'granted_by', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('entitlements', 'grant_note', "TEXT NOT NULL DEFAULT ''");
 sqlite.prepare('UPDATE products SET duration_days = 30 WHERE duration_days <= 0').run();
 
 const now = () => new Date().toISOString();
@@ -268,7 +270,9 @@ function rowToEntitlement(row: Record<string, unknown>): Entitlement {
     discordUserId: String(row.discord_user_id),
     productId: String(row.product_id || ''),
     roleId: String(row.role_id || ''),
-    paymentId: String(row.payment_id),
+    paymentId: String(row.payment_id || ''),
+    grantedBy: String(row.granted_by || ''),
+    grantNote: String(row.grant_note || ''),
     status: String(row.status) as Entitlement['status'],
     expiresAt: String(row.expires_at || ''),
     createdAt: String(row.created_at),
@@ -523,6 +527,29 @@ export const sqliteStore = {
     return this.listEntitlements(input.guildId, input.discordUserId).find((item) => item.id === entitlementId)!;
   },
 
+  grantManualEntitlement(input: { guildId: string; discordUserId: string; roleId: string; days: number; extend: boolean; grantedBy: string; note?: string }): Entitlement {
+    const existingRow = sqlite.prepare("SELECT * FROM entitlements WHERE guild_id=? AND discord_user_id=? AND product_id='' AND payment_id='' ORDER BY created_at DESC LIMIT 1").get(input.guildId, input.discordUserId) as Record<string, unknown> | undefined;
+    const timestamp = now();
+    const currentExpiry = String(existingRow?.expires_at || '');
+    let expiresAt = '';
+    if (input.days > 0) {
+      const base = input.extend && currentExpiry && new Date(currentExpiry).getTime() > Date.now() ? new Date(currentExpiry) : new Date();
+      base.setDate(base.getDate() + input.days);
+      expiresAt = base.toISOString();
+    }
+    if (existingRow) {
+      sqlite.prepare("UPDATE entitlements SET role_id=?,status='active',expires_at=?,granted_by=?,grant_note=?,updated_at=? WHERE id=?").run(input.roleId, expiresAt, input.grantedBy, input.note || '', timestamp, existingRow.id);
+      return rowToEntitlement((sqlite.prepare('SELECT * FROM entitlements WHERE id=?').get(existingRow.id) as Record<string, unknown>));
+    }
+    const entitlementId = id();
+    sqlite.prepare("INSERT INTO entitlements (id,guild_id,discord_user_id,product_id,role_id,payment_id,status,expires_at,granted_by,grant_note,created_at,updated_at) VALUES (?,?,?,'',?,'','active',?,?,?,?,?)").run(entitlementId, input.guildId, input.discordUserId, input.roleId, expiresAt, input.grantedBy, input.note || '', timestamp, timestamp);
+    return rowToEntitlement((sqlite.prepare('SELECT * FROM entitlements WHERE id=?').get(entitlementId) as Record<string, unknown>));
+  },
+
+  revokeUserEntitlements(guildId: string, userId: string, grantedBy: string): void {
+    sqlite.prepare("UPDATE entitlements SET status='revoked',granted_by=?,updated_at=? WHERE guild_id=? AND discord_user_id=? AND status='active'").run(grantedBy, now(), guildId, userId);
+  },
+
   hasActiveEntitlement(guildId: string, userId: string): boolean {
     return Boolean(this.getEntitlement(guildId, userId));
   },
@@ -559,6 +586,17 @@ export const sqliteStore = {
     const row = sqlite.prepare(`SELECT COALESCE(SUM(CASE WHEN status = 'paid' THEN paid_amount_vnd ELSE 0 END), 0) AS paid_total, COUNT(CASE WHEN status = 'paid' THEN 1 END) AS paid_count, COUNT(CASE WHEN status = 'pending' THEN 1 END) AS pending_count, COUNT(DISTINCT CASE WHEN status = 'paid' THEN discord_user_id END) AS donor_count FROM payments WHERE guild_id = ?`).get(guildId) as Record<string, unknown>;
     const activeRooms = Number((sqlite.prepare('SELECT COUNT(*) AS count FROM rooms WHERE guild_id = ?').get(guildId) as Record<string, unknown>).count || 0);
     return { paidTotalVnd: Number(row.paid_total || 0), paidCount: Number(row.paid_count || 0), pendingCount: Number(row.pending_count || 0), donorCount: Number(row.donor_count || 0), activeRooms };
+  },
+
+  getGlobalStats(): { paidTotalVnd: number; paidCount: number; pendingCount: number; donorCount: number; donationTotalVnd: number; donationCount: number; productTotalVnd: number; activeRooms: number; guildCount: number } {
+    const row = sqlite.prepare(`SELECT COALESCE(SUM(CASE WHEN status='paid' THEN paid_amount_vnd ELSE 0 END),0) AS paid_total, COUNT(CASE WHEN status='paid' THEN 1 END) AS paid_count, COUNT(CASE WHEN status='pending' THEN 1 END) AS pending_count, COUNT(DISTINCT CASE WHEN status='paid' THEN guild_id || ':' || discord_user_id END) AS donor_count, COALESCE(SUM(CASE WHEN status='paid' AND type='donation' THEN paid_amount_vnd ELSE 0 END),0) AS donation_total, COUNT(CASE WHEN status='paid' AND type='donation' THEN 1 END) AS donation_count, COALESCE(SUM(CASE WHEN status='paid' AND type='product' THEN paid_amount_vnd ELSE 0 END),0) AS product_total FROM payments`).get() as Record<string, unknown>;
+    const activeRooms = Number((sqlite.prepare('SELECT COUNT(*) AS count FROM rooms').get() as Record<string, unknown>).count || 0);
+    const guildCount = Number((sqlite.prepare('SELECT COUNT(*) AS count FROM guild_settings').get() as Record<string, unknown>).count || 0);
+    return { paidTotalVnd: Number(row.paid_total || 0), paidCount: Number(row.paid_count || 0), pendingCount: Number(row.pending_count || 0), donorCount: Number(row.donor_count || 0), donationTotalVnd: Number(row.donation_total || 0), donationCount: Number(row.donation_count || 0), productTotalVnd: Number(row.product_total || 0), activeRooms, guildCount };
+  },
+
+  listAllPayments(limit = 100): Payment[] {
+    return (sqlite.prepare('SELECT * FROM payments ORDER BY created_at DESC LIMIT ?').all(Math.min(Math.max(limit,1),500)) as Record<string, unknown>[]).map(rowToPayment);
   },
 
   createSession(input: { user: SessionUser; accessToken: string; refreshToken: string; expiresAt: number; guilds: OAuthGuild[] }): AuthSession {

@@ -87,6 +87,8 @@ export interface Entitlement {
   productId: string;
   roleId: string;
   paymentId: string;
+  grantedBy: string;
+  grantNote: string;
   status: 'active' | 'expired' | 'revoked';
   expiresAt: string;
   createdAt: string;

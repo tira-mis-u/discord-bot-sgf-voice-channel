@@ -1,11 +1,11 @@
 // TypeScript source for the browser dashboard. Build output: public/dashboard.js.
 // @ts-nocheck
-const state = { guilds: [], guildId: '', detail: null, runtime: null, editingProduct: null, members: [], membersLoadedAt: 0, membersLoading: false, membersRetryAt: 0, memberPage: 1, liveRooms: [], liveRoomsLoadedAt: 0, liveRoomsLoading: false, passwordRoomId: '' };
+const state = { guilds: [], guildId: '', detail: null, runtime: null, isDeveloper: false, developerSystem: null, developerSystemLoadedAt: 0, developerSystemLoading: false, editingProduct: null, members: [], membersLoadedAt: 0, membersLoading: false, membersRetryAt: 0, memberPage: 1, liveRooms: [], liveRoomsLoadedAt: 0, liveRoomsLoading: false, passwordRoomId: '' };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const vnd = (value) => `${new Intl.NumberFormat('vi-VN').format(Number(value || 0))} ₫`;
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[character] || character));
-const pageNames = { store: 'Cửa hàng', rooms: 'Phòng đang mở', overview: 'Tổng quan', voice: 'Creator channels', products: 'Premium & giá', payments: 'Thanh toán', members: 'Thành viên', integration: 'Tích hợp SGF' };
+const pageNames = { store: 'Cửa hàng', rooms: 'Phòng đang mở', system: 'Study Voice System', overview: 'Tổng quan server', voice: 'Creator channels', products: 'Premium & giá', payments: 'Thanh toán', members: 'Thành viên', integration: 'Tích hợp hệ thống' };
 function setupTheme() {
     const saved = localStorage.getItem('sgf-theme');
     const preferredDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
@@ -75,6 +75,7 @@ function showAuthenticated(user) {
     $('#dashboard').classList.remove('hidden');
     $('#loginButton').classList.add('hidden');
     $('#userChip').classList.remove('hidden');
+    $('.header-user-copy small', $('#userChip')).textContent = state.isDeveloper ? 'Study Voice Developer' : 'Đang đăng nhập';
     $('#headerUserName').textContent = user?.globalName || user?.username || 'Discord user';
 }
 function userIcon(user) {
@@ -88,7 +89,7 @@ function renderGuildCards(guilds = state.guilds) {
     $('#serverCount').textContent = `${visible.length} server khả dụng`;
     grid.innerHTML = visible.map((guild) => {
         const icon = avatarUrl(guild);
-        return `<article class="server-card choose-server" data-id="${esc(guild.id)}" role="button" tabindex="0" aria-label="Mở server ${esc(guild.name)}"><div class="server-card-top"><span class="server-card-icon">${icon ? `<img src="${icon}" alt="" />` : '<i class="fa-brands fa-discord"></i>'}</span><span class="server-card-arrow"><i class="fa-solid fa-arrow-right"></i></span></div><h3>${esc(guild.name)}</h3><span class="server-card-meta ${guild.canManage ? '' : 'server-store-meta'}"><i class="fa-solid ${guild.canManage ? 'fa-user-shield' : 'fa-store'}"></i> ${guild.canManage ? 'Quản trị đầy đủ' : 'Cửa hàng Premium'}</span><span class="server-card-id">ID ${esc(guild.id)}</span></article>`;
+        return `<article class="server-card choose-server" data-id="${esc(guild.id)}" role="button" tabindex="0" aria-label="Mở server ${esc(guild.name)}"><div class="server-card-top"><span class="server-card-icon">${icon ? `<img src="${icon}" alt="" />` : '<i class="fa-brands fa-discord"></i>'}</span><span class="server-card-arrow"><i class="fa-solid fa-arrow-right"></i></span></div><h3>${esc(guild.name)}</h3><span class="server-card-meta ${guild.canManage ? '' : 'server-store-meta'}"><i class="fa-solid ${guild.isDeveloper ? 'fa-code' : guild.canManage ? 'fa-user-shield' : 'fa-store'}"></i> ${guild.isDeveloper ? 'Developer toàn hệ thống' : guild.canManage ? 'Quản trị server' : 'Cửa hàng Premium'}</span><span class="server-card-id">ID ${esc(guild.id)}</span></article>`;
     }).join('');
     $$('.choose-server').forEach((card) => {
         card.addEventListener('click', () => selectGuild(card.dataset.id));
@@ -109,23 +110,35 @@ async function loadGuilds() {
 }
 function applyAccessMode() {
     const admin = Boolean(state.detail?.canManage);
+    const developer = Boolean(state.detail?.isDeveloper || state.isDeveloper);
     $$('.admin-only-nav').forEach((element) => element.classList.toggle('hidden', !admin));
     $$('.admin-only-panel').forEach((element) => element.classList.toggle('enabled', admin));
     $$('.admin-only-control').forEach((element) => element.classList.toggle('hidden', !admin));
+    $$('.developer-only-nav').forEach((element) => { element.classList.toggle('hidden', !developer); element.classList.toggle('enabled', developer); });
+    $$('.developer-only-panel').forEach((element) => element.classList.toggle('enabled', developer));
+    $$('.developer-only-control').forEach((element) => element.classList.toggle('hidden', !developer));
+    $$('.developer-money').forEach((element) => element.classList.toggle('hidden', !developer));
 }
 function setPage(page) {
     if (!state.guildId)
         return;
-    if (!state.detail?.canManage && !['store', 'rooms'].includes(page))
-        page = 'store';
+    const developer = Boolean(state.detail?.isDeveloper || state.isDeveloper);
+    const admin = Boolean(state.detail?.canManage);
+    const allowed = developer
+        ? Object.keys(pageNames)
+        : admin ? ['store', 'rooms', 'voice', 'members'] : ['store', 'rooms'];
+    if (!allowed.includes(page))
+        page = admin ? 'voice' : 'store';
     $$('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.page === page));
     $$('.page-panel').forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === page));
     $('#breadcrumbPage').textContent = pageNames[page] || page;
     history.replaceState(null, '', `#${page}`);
-    if (page === 'members' && state.detail?.canManage)
+    if (page === 'members' && admin)
         loadMembers();
     if (page === 'rooms')
         loadLiveRooms();
+    if (page === 'system' && developer)
+        loadDeveloperSystem();
 }
 async function selectGuild(guildId) {
     state.guildId = guildId;
@@ -161,7 +174,7 @@ async function loadGuild(guildId) {
     try {
         state.detail = await api(`/api/guilds/${encodeURIComponent(guildId)}`);
         renderDetail();
-        setPage(state.detail.canManage ? 'overview' : 'store');
+        setPage(state.detail.isDeveloper ? 'system' : state.detail.canManage ? 'voice' : 'store');
     }
     catch (error) {
         toast(error.message, 'bad');
@@ -176,9 +189,11 @@ function renderDetail() {
     $('#navRoomCount').textContent = stats.activeRooms;
     $('#liveRoomCount').textContent = stats.activeRooms;
     const subscription = state.detail.subscription || { premium: false, expiresAt: '', freeEditableLimit: 1 };
-    $('#roomPlanStatus').innerHTML = subscription.premium
-        ? `<i class="fa-solid fa-crown"></i> Premium${subscription.expiresAt ? ` đến ${new Date(subscription.expiresAt).toLocaleDateString('vi-VN')}` : ''}`
-        : `<i class="fa-solid fa-seedling"></i> Free - ${subscription.freeEditableLimit || 1} phòng editable`;
+    $('#roomPlanStatus').innerHTML = subscription.founder
+        ? '<i class="fa-solid fa-shield-halved"></i> Founder Premium - không giới hạn'
+        : subscription.premium
+            ? `<i class="fa-solid fa-crown"></i> Premium${subscription.expiresAt ? ` đến ${new Date(subscription.expiresAt).toLocaleDateString('vi-VN')}` : ''}`
+            : `<i class="fa-solid fa-seedling"></i> Free - ${subscription.freeEditableLimit || 1} phòng editable`;
     $('#statRevenue').textContent = vnd(stats.paidTotalVnd);
     $('#revenueBig').textContent = vnd(stats.paidTotalVnd);
     $('#statDonors').textContent = stats.donorCount;
@@ -192,8 +207,41 @@ function renderDetail() {
     renderStore(products);
     renderIntegration(sepay, integration);
     renderSetupProgress(settings, products, sepay);
-    if (state.detail.canManage)
+    if (state.detail.canManageMoney)
         loadPayments(true);
+}
+async function loadDeveloperSystem(force = false) {
+    if (!state.isDeveloper || state.developerSystemLoading)
+        return;
+    if (!force && state.developerSystem && Date.now() - state.developerSystemLoadedAt < 20_000) {
+        renderDeveloperSystem();
+        return;
+    }
+    state.developerSystemLoading = true;
+    try {
+        state.developerSystem = await api('/api/developer/system?limit=100');
+        state.developerSystemLoadedAt = Date.now();
+        renderDeveloperSystem();
+    }
+    catch (error) {
+        toast(error.message, 'bad');
+    }
+    finally {
+        state.developerSystemLoading = false;
+    }
+}
+function renderDeveloperSystem() {
+    const data = state.developerSystem;
+    if (!data)
+        return;
+    const stats = data.stats || {};
+    $('#systemRevenue').textContent = vnd(stats.paidTotalVnd);
+    $('#systemDonate').textContent = vnd(stats.donationTotalVnd);
+    $('#systemDonationCount').textContent = `${stats.donationCount || 0} giao dịch donate`;
+    $('#systemGuilds').textContent = stats.guildCount || 0;
+    $('#systemRooms').textContent = stats.activeRooms || 0;
+    $('#developerGuildTable').innerHTML = data.guilds?.length ? `<table class="data-table"><thead><tr><th>SERVER</th><th>MEMBER</th><th>DOANH THU</th><th>DONOR</th><th>PHÒNG</th></tr></thead><tbody>${data.guilds.map((guild) => `<tr><td><strong>${esc(guild.name)}</strong><small class="member-subname">${esc(guild.id)}</small></td><td>${guild.memberCount || 0}</td><td>${vnd(guild.stats?.paidTotalVnd)}</td><td>${guild.stats?.donorCount || 0}</td><td>${guild.stats?.activeRooms || 0}</td></tr>`).join('')}</tbody></table>` : '<div class="inline-empty">Chưa có server nào kết nối.</div>';
+    $('#developerPaymentTable').innerHTML = data.payments?.length ? paymentTable(data.payments) : '<div class="inline-empty">Chưa có giao dịch toàn hệ thống.</div>';
 }
 function renderSetupProgress(settings, products, sepay) {
     const completed = [settings.creatorChannels.length > 0, products.length > 0, Boolean(sepay.dynamicQrConfigured || sepay.staticQrConfigured), Boolean(sepay.webhookConfigured || sepay.apiTokenConfigured)];
@@ -315,9 +363,11 @@ async function loadLiveRooms(force = false) {
         $('#liveRoomsTitle').textContent = result.admin ? 'Quản lý tất cả phòng' : 'Phòng của tôi';
         $('#liveRoomsSubtitle').textContent = result.admin ? 'Admin có thể quản lý mọi phòng do bot tạo và thành viên đang ở trong đó.' : 'Bạn chỉ thấy và điều khiển các phòng mình đang là host.';
         const subscription = result.subscription || { premium: false, expiresAt: '', freeEditableLimit: 1 };
-        $('#roomPlanStatus').innerHTML = subscription.premium
-            ? `<i class="fa-solid fa-crown"></i> Premium${subscription.expiresAt ? ` đến ${new Date(subscription.expiresAt).toLocaleDateString('vi-VN')}` : ''}`
-            : `<i class="fa-solid fa-seedling"></i> Free - ${subscription.freeEditableLimit || 1} phòng editable`;
+        $('#roomPlanStatus').innerHTML = subscription.founder
+            ? '<i class="fa-solid fa-shield-halved"></i> Founder Premium - không giới hạn'
+            : subscription.premium
+                ? `<i class="fa-solid fa-crown"></i> Premium${subscription.expiresAt ? ` đến ${new Date(subscription.expiresAt).toLocaleDateString('vi-VN')}` : ''}`
+                : `<i class="fa-solid fa-seedling"></i> Free - ${subscription.freeEditableLimit || 1} phòng editable`;
         renderLiveRooms();
     }
     catch (error) {
@@ -516,7 +566,41 @@ function renderMembers() {
         $('#membersTable').innerHTML = `<div class="member-empty"><i class="fa-solid fa-users-slash"></i><strong>${members.length ? 'Không tìm thấy thành viên' : 'Chưa có thành viên nào'}</strong><span>${members.length ? 'Thử đổi từ khóa tìm kiếm.' : 'Bot chưa nhận được member list từ server.'}</span></div>`;
         return;
     }
-    $('#membersTable').innerHTML = `<table class="data-table"><thead><tr><th>THÀNH VIÊN</th><th>DISCORD ID</th><th>ROLE</th><th>THANH TOÁN</th><th>TRẠNG THÁI</th><th>THAM GIA</th></tr></thead><tbody>${pageMembers.map((member) => `<tr><td><span class="member-name"><span class="member-avatar">${member.avatarUrl ? `<img src="${esc(member.avatarUrl)}" alt="" loading="lazy" />` : '<i class="fa-solid fa-user"></i>'}</span><span><strong>${esc(member.displayName)}</strong><small class="member-subname">@${esc(member.username)}</small></span></span></td><td class="mono">${esc(member.id)}</td><td>${member.premium ? '<span class="member-role-chip"><i class="fa-solid fa-gem"></i> Premium</span>' : '<span class="member-muted">Thành viên</span>'}</td><td>${member.paid ? `<strong>${vnd(member.payment.paidTotalVnd)}</strong><small class="member-subname">${member.payment.paidCount} giao dịch</small>` : '<span class="member-muted">Chưa thanh toán</span>'}</td><td>${member.paid ? '<span class="status-paid"><i class="fa-solid fa-circle-check"></i> Đã mua</span>' : '<span class="member-muted"><i class="fa-solid fa-circle-minus"></i> Chưa mua</span>'}</td><td>${member.joinedAt ? new Date(member.joinedAt).toLocaleDateString('vi-VN') : 'Không rõ'}</td></tr>`).join('')}</tbody></table>`;
+    const memberCell = (member) => `<span class="member-name"><span class="member-avatar">${member.avatarUrl ? `<img src="${esc(member.avatarUrl)}" alt="" loading="lazy" />` : '<i class="fa-solid fa-user"></i>'}</span><span><strong>${esc(member.displayName)}</strong><small class="member-subname">@${esc(member.username)}</small></span></span>`;
+    const roleCell = (member) => member.founder
+        ? '<span class="member-role-chip founder-chip"><i class="fa-solid fa-shield-halved"></i> Founder Premium</span>'
+        : member.premium ? '<span class="member-role-chip"><i class="fa-solid fa-gem"></i> Premium</span>' : '<span class="member-muted">Thành viên</span>';
+    $('#membersTable').innerHTML = state.detail?.canManageMoney
+        ? `<table class="data-table"><thead><tr><th>THÀNH VIÊN</th><th>DISCORD ID</th><th>ROLE</th><th>THANH TOÁN</th><th>TRẠNG THÁI</th><th>THAM GIA</th><th>ĐẶC QUYỀN</th></tr></thead><tbody>${pageMembers.map((member) => `<tr><td>${memberCell(member)}</td><td class="mono">${esc(member.id)}</td><td>${roleCell(member)}</td><td>${member.paid ? `<strong>${vnd(member.payment.paidTotalVnd)}</strong><small class="member-subname">${member.payment.paidCount} giao dịch</small>` : '<span class="member-muted">Chưa thanh toán</span>'}</td><td>${member.paid ? '<span class="status-paid"><i class="fa-solid fa-circle-check"></i> Đã mua</span>' : '<span class="member-muted">Chưa mua</span>'}</td><td>${member.joinedAt ? new Date(member.joinedAt).toLocaleDateString('vi-VN') : 'Không rõ'}</td><td><div class="premium-admin-actions"><button class="button button-light premium-action" data-user-id="${esc(member.id)}" data-action="grant">Cấp</button><button class="button button-light premium-action" data-user-id="${esc(member.id)}" data-action="extend">Gia hạn</button><button class="button button-danger premium-action" data-user-id="${esc(member.id)}" data-action="revoke">Thu hồi</button></div></td></tr>`).join('')}</tbody></table>`
+        : `<table class="data-table"><thead><tr><th>THÀNH VIÊN</th><th>DISCORD ID</th><th>ROLE</th><th>THAM GIA</th></tr></thead><tbody>${pageMembers.map((member) => `<tr><td>${memberCell(member)}</td><td class="mono">${esc(member.id)}</td><td>${roleCell(member)}</td><td>${member.joinedAt ? new Date(member.joinedAt).toLocaleDateString('vi-VN') : 'Không rõ'}</td></tr>`).join('')}</tbody></table>`;
+    $$('.premium-action').forEach((button) => button.addEventListener('click', () => manageMemberPremium(button.dataset.userId, button.dataset.action)));
+}
+async function manageMemberPremium(userId, action) {
+    if (!state.isDeveloper || !state.guildId)
+        return;
+    let days = 30;
+    if (action === 'revoke') {
+        if (!window.confirm('Thu hồi toàn bộ entitlement Premium đang active của member này?'))
+            return;
+        days = 0;
+    }
+    else {
+        const raw = window.prompt(action === 'extend' ? 'Gia hạn thêm bao nhiêu ngày? Nhập 0 để chuyển thành không thời hạn.' : 'Cấp Premium bao nhiêu ngày? Nhập 0 để cấp không thời hạn.', '30');
+        if (raw === null)
+            return;
+        days = Math.min(3650, Math.max(0, Math.round(Number(raw))));
+        if (!Number.isFinite(days))
+            return toast('Số ngày không hợp lệ.', 'bad');
+    }
+    try {
+        const result = await api(`/api/developer/guilds/${state.guildId}/premium`, { method: 'POST', body: JSON.stringify({ userId, action, days }) });
+        toast(result.message || 'Đã cập nhật Premium.');
+        state.membersLoadedAt = 0;
+        await loadMembers(true);
+    }
+    catch (error) {
+        toast(error.message, 'bad');
+    }
 }
 function renderProducts(products = []) {
     $('#productCount').textContent = products.length;
@@ -694,6 +778,7 @@ async function init() {
     $('#postPanelButton').addEventListener('click', postPanel);
     $('#refreshPaymentsButton').addEventListener('click', () => loadPayments(false));
     $('#refreshLiveRoomsButton').addEventListener('click', () => loadLiveRooms(true));
+    $('#refreshDeveloperSystem').addEventListener('click', () => loadDeveloperSystem(true));
     $('#roomPasswordForm').addEventListener('submit', saveRoomPassword);
     $('#cancelRoomPassword').addEventListener('click', closeRoomPasswordDialog);
     $('#roomPasswordDialog').addEventListener('click', (event) => { if (event.target.id === 'roomPasswordDialog')
@@ -714,6 +799,7 @@ async function init() {
             showLoggedOut();
             return;
         }
+        state.isDeveloper = Boolean(session.isDeveloper);
         showAuthenticated(session.user);
         userIcon(session.user);
         await loadGuilds();

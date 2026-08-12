@@ -6,11 +6,14 @@ import { postgresSql as sql, postgresStore } from '../src/storage/postgres-store
 
 if (!config.databaseUrl) throw new Error('DATABASE_URL is required. Use the Supabase PostgreSQL connection string.');
 
-const schemaFile = path.resolve('supabase/migrations/0001_initial_schema.sql');
-if (!fs.existsSync(schemaFile)) throw new Error(`Missing schema migration: ${schemaFile}`);
+const migrationsDir = path.resolve('supabase/migrations');
+const migrationFiles = fs.readdirSync(migrationsDir).filter((name) => name.endsWith('.sql')).sort();
+if (!migrationFiles.length) throw new Error(`No SQL migrations found in ${migrationsDir}`);
 
-console.log('[migration] applying PostgreSQL schema');
-await sql.unsafe(fs.readFileSync(schemaFile, 'utf8'));
+for (const file of migrationFiles) {
+  console.log(`[migration] applying ${file}`);
+  await sql.unsafe(fs.readFileSync(path.join(migrationsDir, file), 'utf8'));
+}
 
 const guildRows = sqlite.prepare('select guild_id, guild_name from guild_settings order by guild_id').all() as Array<{ guild_id: string; guild_name: string }>;
 for (const guildRow of guildRows) {
@@ -54,9 +57,9 @@ console.log(`[migration] payment events: ${eventRows.length}`);
 
 const entitlementRows = sqlite.prepare('select * from entitlements order by created_at').all() as Record<string, unknown>[];
 for (const row of entitlementRows) {
-  await sql`insert into public.entitlements (id,guild_id,discord_user_id,product_id,role_id,payment_id,status,expires_at,created_at,updated_at)
-    values (${String(row.id)}::uuid,${String(row.guild_id)},${String(row.discord_user_id)},${row.product_id ? String(row.product_id) : null}::uuid,${String(row.role_id || '')},${String(row.payment_id)}::uuid,${String(row.status)},${row.expires_at ? String(row.expires_at) : null}::timestamptz,${String(row.created_at)}::timestamptz,${String(row.updated_at)}::timestamptz)
-    on conflict (id) do update set role_id=excluded.role_id,payment_id=excluded.payment_id,status=excluded.status,expires_at=excluded.expires_at,updated_at=excluded.updated_at`;
+  await sql`insert into public.entitlements (id,guild_id,discord_user_id,product_id,role_id,payment_id,granted_by,grant_note,status,expires_at,created_at,updated_at)
+    values (${String(row.id)}::uuid,${String(row.guild_id)},${String(row.discord_user_id)},${row.product_id ? String(row.product_id) : null}::uuid,${String(row.role_id || '')},${row.payment_id ? String(row.payment_id) : null}::uuid,${String(row.granted_by || '')},${String(row.grant_note || '')},${String(row.status)},${row.expires_at ? String(row.expires_at) : null}::timestamptz,${String(row.created_at)}::timestamptz,${String(row.updated_at)}::timestamptz)
+    on conflict (id) do update set role_id=excluded.role_id,payment_id=excluded.payment_id,granted_by=excluded.granted_by,grant_note=excluded.grant_note,status=excluded.status,expires_at=excluded.expires_at,updated_at=excluded.updated_at`;
 }
 console.log(`[migration] entitlements: ${entitlementRows.length}`);
 

@@ -90,7 +90,7 @@ function rowToPayment(row: Record<string, unknown>): Payment {
 function rowToEntitlement(row: Record<string, unknown>): Entitlement {
   return {
     id: String(row.id), guildId: String(row.guild_id), discordUserId: String(row.discord_user_id), productId: String(row.product_id || ''),
-    roleId: String(row.role_id || ''), paymentId: String(row.payment_id), status: String(row.status) as Entitlement['status'],
+    roleId: String(row.role_id || ''), paymentId: String(row.payment_id || ''), grantedBy: String(row.granted_by || ''), grantNote: String(row.grant_note || ''), status: String(row.status) as Entitlement['status'],
     expiresAt: iso(row.expires_at), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
   };
 }
@@ -329,6 +329,29 @@ export const postgresStore = {
     return (await this.listEntitlements(input.guildId, input.discordUserId)).find((item) => item.id === entitlementId)!;
   },
 
+  async grantManualEntitlement(input: { guildId: string; discordUserId: string; roleId: string; days: number; extend: boolean; grantedBy: string; note?: string }): Promise<Entitlement> {
+    const rows = await sql`select * from public.entitlements where guild_id=${input.guildId} and discord_user_id=${input.discordUserId} and product_id is null and payment_id is null order by created_at desc limit 1`;
+    const existing = rows[0];
+    const currentExpiry = iso(existing?.expires_at);
+    let expiresAt = '';
+    if (input.days > 0) {
+      const base = input.extend && currentExpiry && new Date(currentExpiry).getTime() > Date.now() ? new Date(currentExpiry) : new Date();
+      base.setDate(base.getDate() + input.days);
+      expiresAt = base.toISOString();
+    }
+    if (existing) {
+      const updated = await sql`update public.entitlements set role_id=${input.roleId},status='active',expires_at=${expiresAt || null}::timestamptz,granted_by=${input.grantedBy},grant_note=${input.note || ''},updated_at=now() where id=${String(existing.id)}::uuid returning *`;
+      return rowToEntitlement(updated[0]);
+    }
+    const entitlementId = id();
+    const inserted = await sql`insert into public.entitlements (id,guild_id,discord_user_id,product_id,role_id,payment_id,status,expires_at,granted_by,grant_note,created_at,updated_at) values (${entitlementId}::uuid,${input.guildId},${input.discordUserId},null,${input.roleId},null,'active',${expiresAt || null}::timestamptz,${input.grantedBy},${input.note || ''},now(),now()) returning *`;
+    return rowToEntitlement(inserted[0]);
+  },
+
+  async revokeUserEntitlements(guildId: string, userId: string, grantedBy: string): Promise<void> {
+    await sql`update public.entitlements set status='revoked',granted_by=${grantedBy},updated_at=now() where guild_id=${guildId} and discord_user_id=${userId} and status='active'`;
+  },
+
   async hasActiveEntitlement(guildId: string, userId: string): Promise<boolean> {
     return Boolean(await this.getEntitlement(guildId, userId));
   },
@@ -359,6 +382,21 @@ export const postgresStore = {
     ]);
     const row = paymentRows[0] || {};
     return { paidTotalVnd: Number(row.paid_total || 0), paidCount: Number(row.paid_count || 0), pendingCount: Number(row.pending_count || 0), donorCount: Number(row.donor_count || 0), activeRooms: Number(roomRows[0]?.count || 0) };
+  },
+
+  async getGlobalStats(): Promise<{ paidTotalVnd: number; paidCount: number; pendingCount: number; donorCount: number; donationTotalVnd: number; donationCount: number; productTotalVnd: number; activeRooms: number; guildCount: number }> {
+    const [paymentRows, roomRows, guildRows] = await Promise.all([
+      sql`select coalesce(sum(case when status='paid' then paid_amount_vnd else 0 end),0)::bigint as paid_total,count(*) filter (where status='paid')::int as paid_count,count(*) filter (where status='pending')::int as pending_count,count(distinct guild_id || ':' || discord_user_id) filter (where status='paid')::int as donor_count,coalesce(sum(case when status='paid' and type='donation' then paid_amount_vnd else 0 end),0)::bigint as donation_total,count(*) filter (where status='paid' and type='donation')::int as donation_count,coalesce(sum(case when status='paid' and type='product' then paid_amount_vnd else 0 end),0)::bigint as product_total from public.payments`,
+      sql`select count(*)::int as count from public.rooms`,
+      sql`select count(*)::int as count from public.guild_settings`,
+    ]);
+    const row = paymentRows[0] || {};
+    return { paidTotalVnd: Number(row.paid_total || 0), paidCount: Number(row.paid_count || 0), pendingCount: Number(row.pending_count || 0), donorCount: Number(row.donor_count || 0), donationTotalVnd: Number(row.donation_total || 0), donationCount: Number(row.donation_count || 0), productTotalVnd: Number(row.product_total || 0), activeRooms: Number(roomRows[0]?.count || 0), guildCount: Number(guildRows[0]?.count || 0) };
+  },
+
+  async listAllPayments(limit = 100): Promise<Payment[]> {
+    const rows = await sql`select * from public.payments order by created_at desc limit ${Math.min(Math.max(limit,1),500)}`;
+    return rows.map((row) => rowToPayment(row));
   },
 
   async createSession(input: { user: SessionUser; accessToken: string; refreshToken: string; expiresAt: number; guilds: OAuthGuild[] }): Promise<AuthSession> {

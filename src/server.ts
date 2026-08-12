@@ -87,18 +87,28 @@ function sessionGuild(session: AuthSession | undefined, guildId: string): OAuthG
   return session?.guilds.find((guild) => guild.id === guildId);
 }
 
+function isDeveloper(session: AuthSession | undefined): boolean {
+  return Boolean(session?.user.id && config.developerIds.includes(session.user.id));
+}
+
 function canAccessGuild(req: AuthRequest, guildId: string): boolean {
   if (!req.authSession) return false;
-  const guild = sessionGuild(req.authSession, guildId);
   const botAccess = bot.getGuildAccess(guildId);
+  if (isDeveloper(req.authSession)) return botAccess.present && botAccess.administrator;
+  const guild = sessionGuild(req.authSession, guildId);
   return Boolean(guild && botAccess.present && botAccess.administrator);
 }
 
 function canManageGuild(req: AuthRequest, guildId: string): boolean {
   if (!req.authSession) return false;
-  const guild = sessionGuild(req.authSession, guildId);
   const botAccess = bot.getGuildAccess(guildId);
+  if (isDeveloper(req.authSession)) return botAccess.present && botAccess.administrator;
+  const guild = sessionGuild(req.authSession, guildId);
   return Boolean(guild && isDiscordAdmin(guild.permissions, guild.owner) && botAccess.present && botAccess.administrator);
+}
+
+function canManageMoney(req: AuthRequest): boolean {
+  return isDeveloper(req.authSession);
 }
 
 function requireGuildAccess(req: AuthRequest, res: Response, guildId: string): boolean {
@@ -120,6 +130,18 @@ function requireGuildAdmin(req: AuthRequest, res: Response, guildId: string): bo
   }
   if (!canManageGuild(req, guildId)) {
     res.status(403).json({ error: 'ADMIN_REQUIRED', message: 'Bạn phải là owner hoặc Administrator của server.' });
+    return false;
+  }
+  return true;
+}
+
+function requireDeveloper(req: AuthRequest, res: Response): boolean {
+  if (!req.authSession) {
+    res.status(401).json({ error: 'AUTH_REQUIRED', message: 'Đăng nhập Discord để tiếp tục.' });
+    return false;
+  }
+  if (!isDeveloper(req.authSession)) {
+    res.status(403).json({ error: 'DEVELOPER_REQUIRED', message: 'Mục này chỉ dành cho Study Voice developers.' });
     return false;
   }
   return true;
@@ -242,17 +264,54 @@ app.get('/api/runtime', (_req, res) => {
 });
 
 app.get('/api/session', async (req: AuthRequest, res: Response) => {
-  res.json({ authenticated: Boolean(req.authSession), user: req.authSession?.user || null });
+  res.json({ authenticated: Boolean(req.authSession), user: req.authSession?.user || null, isDeveloper: isDeveloper(req.authSession) });
 });
 
 app.get('/api/guilds', requireAuth, async (req: AuthRequest, res: Response) => {
-  const guilds = (await Promise.all((req.authSession?.guilds || []).map(async (guild) => ({
+  const developer = isDeveloper(req.authSession);
+  const sourceGuilds: OAuthGuild[] = developer
+    ? bot.listConnectedGuilds().map((guild) => ({ id: guild.id, name: guild.name, icon: guild.icon, owner: true, permissions: '8' }))
+    : req.authSession?.guilds || [];
+  const guilds = (await Promise.all(sourceGuilds.map(async (guild) => ({
     ...guild,
-    canManage: isDiscordAdmin(guild.permissions, guild.owner),
+    canManage: developer || isDiscordAdmin(guild.permissions, guild.owner),
+    canManageMoney: developer,
+    isDeveloper: developer,
     bot: bot.getGuildAccess(guild.id),
     settings: await store.getSettings(guild.id, guild.name),
   })))).filter((guild) => guild.bot.present && guild.bot.administrator);
-  res.json({ guilds });
+  res.json({ guilds, isDeveloper: developer });
+});
+
+app.get('/api/developer/system', requireAuth, async (req: AuthRequest, res: Response) => {
+  if (!requireDeveloper(req, res)) return;
+  const connectedGuilds = bot.listConnectedGuilds();
+  const [stats, payments, guilds] = await Promise.all([
+    store.getGlobalStats(),
+    store.listAllPayments(Math.min(500, Math.max(1, Number(req.query.limit || 100)))),
+    Promise.all(connectedGuilds.map(async (guild) => ({ ...guild, stats: await store.getStats(guild.id) }))),
+  ]);
+  res.json({ stats: { ...stats, guildCount: connectedGuilds.length }, payments, guilds });
+});
+
+app.post('/api/developer/guilds/:guildId/premium', requireAuth, async (req: AuthRequest, res: Response) => {
+  if (!requireDeveloper(req, res)) return;
+  const parsed = z.object({
+    userId: z.string().min(1).max(32),
+    action: z.enum(['grant', 'extend', 'revoke']),
+    days: z.number().int().min(0).max(3650).default(30),
+    note: z.string().max(200).optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'INVALID_PREMIUM_ACTION', details: parsed.error.flatten() });
+    return;
+  }
+  try {
+    const result = await bot.manageManualPremium({ guildId: String(req.params.guildId), developerId: req.authSession!.user.id, ...parsed.data });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Không cập nhật được Premium.' });
+  }
 });
 
 app.get('/api/guilds/:guildId', requireAuth, async (req: AuthRequest, res: Response) => {
@@ -261,18 +320,34 @@ app.get('/api/guilds/:guildId', requireAuth, async (req: AuthRequest, res: Respo
   const guild = sessionGuild(req.authSession, guildId);
   const settings = await store.getSettings(guildId, guild?.name || '');
   const canManage = canManageGuild(req, guildId);
+  const developer = isDeveloper(req.authSession);
   const entitlement = req.authSession ? await store.getEntitlement(guildId, req.authSession.user.id) : undefined;
+  const roomRows = canManage ? await store.listRooms(guildId) : [];
+  const rooms = roomRows.map(({ passwordHash, passwordSalt: _passwordSalt, ...room }) => ({ ...room, passwordEnabled: Boolean(passwordHash) }));
+  const stats = developer
+    ? await store.getStats(guildId)
+    : { paidTotalVnd: 0, paidCount: 0, pendingCount: 0, donorCount: 0, activeRooms: roomRows.length };
+  const visibleSettings = developer ? settings : {
+    ...settings,
+    paymentPanelChannelId: '',
+    bankCode: '',
+    bankAccountNumber: '',
+    bankAccountName: '',
+    staticQrUrl: '',
+  };
   res.json({
     guild: guild || { id: guildId, name: settings.guildName },
     canManage,
+    canManageMoney: developer,
+    isDeveloper: developer,
     bot: bot.getGuildAccess(guildId),
-    subscription: { premium: Boolean(entitlement), expiresAt: entitlement?.expiresAt || '', freeEditableLimit: 1 },
-    settings,
-    products: await store.listProducts(guildId, !canManage),
-    stats: canManage ? await store.getStats(guildId) : { paidTotalVnd: 0, paidCount: 0, pendingCount: 0, donorCount: 0, activeRooms: 0 },
-    rooms: canManage ? (await store.listRooms(guildId)).map(({ passwordHash, passwordSalt: _passwordSalt, ...room }) => ({ ...room, passwordEnabled: Boolean(passwordHash) })) : [],
-    sepay: { webhookConfigured: Boolean(config.sepay.webhookApiKey), apiTokenConfigured: isSepayApiConfigured(), apiBaseUrl: config.sepay.apiBaseUrl, dynamicQrConfigured: Boolean(settings.bankCode || config.sepay.bankCode) && Boolean(settings.bankAccountNumber || config.sepay.accountNumber), staticQrConfigured: Boolean(settings.staticQrUrl || config.sepay.staticQrUrl), webhookUrl: `${config.publicUrl}/api/payments/sepay/webhook` },
-    integration: { paymentsEndpoint: `${config.publicUrl}/api/integrations/sgf/payments`, entitlementsEndpoint: `${config.publicUrl}/api/integrations/sgf/entitlements`, eventsConfigured: Boolean(config.sgf.eventsWebhookUrl) },
+    subscription: { premium: developer || Boolean(entitlement), founder: developer, expiresAt: developer ? '' : entitlement?.expiresAt || '', freeEditableLimit: 1 },
+    settings: visibleSettings,
+    products: await store.listProducts(guildId, !developer),
+    stats,
+    rooms,
+    sepay: developer ? { webhookConfigured: Boolean(config.sepay.webhookApiKey), apiTokenConfigured: isSepayApiConfigured(), apiBaseUrl: config.sepay.apiBaseUrl, dynamicQrConfigured: Boolean(settings.bankCode || config.sepay.bankCode) && Boolean(settings.bankAccountNumber || config.sepay.accountNumber), staticQrConfigured: Boolean(settings.staticQrUrl || config.sepay.staticQrUrl), webhookUrl: `${config.publicUrl}/api/payments/sepay/webhook` } : { webhookConfigured: false, apiTokenConfigured: false, apiBaseUrl: '', dynamicQrConfigured: false, staticQrConfigured: false, webhookUrl: '' },
+    integration: developer ? { paymentsEndpoint: `${config.publicUrl}/api/integrations/sgf/payments`, entitlementsEndpoint: `${config.publicUrl}/api/integrations/sgf/entitlements`, eventsConfigured: Boolean(config.sgf.eventsWebhookUrl) } : { paymentsEndpoint: '', entitlementsEndpoint: '', eventsConfigured: false },
   });
 });
 
@@ -364,7 +439,16 @@ app.put('/api/guilds/:guildId/settings', requireAuth, async (req: AuthRequest, r
     }
   }
   const guild = sessionGuild(req.authSession, guildId);
-  const patch = { ...parsed.data, ...(guild?.name ? { guildName: guild.name } : {}) };
+  const developer = isDeveloper(req.authSession);
+  const voicePatch = {
+    creatorChannels: parsed.data.creatorChannels,
+    premiumRoleId: parsed.data.premiumRoleId,
+    controlChannelId: parsed.data.controlChannelId,
+    defaultRoomCategoryId: parsed.data.defaultRoomCategoryId,
+    roomNameTemplate: parsed.data.roomNameTemplate,
+  };
+  const allowedPatch = developer ? parsed.data : Object.fromEntries(Object.entries(voicePatch).filter(([, value]) => value !== undefined));
+  const patch = { ...allowedPatch, ...(guild?.name ? { guildName: guild.name } : {}) };
   const settings = await store.updateSettings(guildId, patch);
   res.json({ settings });
 });
@@ -381,7 +465,7 @@ const productInput = z.object({
 
 app.post('/api/guilds/:guildId/products', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
-  if (!requireGuildAdmin(req, res, guildId)) return;
+  if (!requireDeveloper(req, res)) return;
   const parsed = productInput.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'INVALID_PRODUCT', details: parsed.error.flatten() });
@@ -394,7 +478,7 @@ app.post('/api/guilds/:guildId/products', requireAuth, async (req: AuthRequest, 
 app.put('/api/guilds/:guildId/products/:productId', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   const productId = String(req.params.productId);
-  if (!requireGuildAdmin(req, res, guildId)) return;
+  if (!requireDeveloper(req, res)) return;
   const existing = await store.getProduct(productId);
   if (!existing || existing.guildId !== guildId) {
     res.status(404).json({ error: 'PRODUCT_NOT_FOUND' });
@@ -411,7 +495,7 @@ app.put('/api/guilds/:guildId/products/:productId', requireAuth, async (req: Aut
 app.delete('/api/guilds/:guildId/products/:productId', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
   const productId = String(req.params.productId);
-  if (!requireGuildAdmin(req, res, guildId)) return;
+  if (!requireDeveloper(req, res)) return;
   const existing = await store.getProduct(productId);
   if (!existing || existing.guildId !== guildId) {
     res.status(404).json({ error: 'PRODUCT_NOT_FOUND' });
@@ -423,14 +507,14 @@ app.delete('/api/guilds/:guildId/products/:productId', requireAuth, async (req: 
 
 app.get('/api/guilds/:guildId/sepay-status', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
-  if (!requireGuildAdmin(req, res, guildId)) return;
+  if (!requireDeveloper(req, res)) return;
   const status = await getSepayApiStatus(String(req.query.refresh || '') === '1');
   res.json({ status });
 });
 
 app.get('/api/guilds/:guildId/payments', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
-  if (!requireGuildAdmin(req, res, guildId)) return;
+  if (!requireDeveloper(req, res)) return;
   const limit = Math.min(500, Math.max(1, Number(req.query.limit || 100)));
   res.json({ payments: await store.listPayments(guildId, Number.isFinite(limit) ? limit : 100) });
 });
@@ -446,9 +530,10 @@ app.get('/api/guilds/:guildId/live-rooms', requireAuth, async (req: AuthRequest,
   if (!requireGuildAccess(req, res, guildId)) return;
   try {
     const admin = canManageGuild(req, guildId);
+    const developer = isDeveloper(req.authSession);
     const rooms = await bot.listLiveRooms(guildId, req.authSession!.user.id, admin);
     const entitlement = await store.getEntitlement(guildId, req.authSession!.user.id);
-    res.json({ rooms, admin, subscription: { premium: Boolean(entitlement), expiresAt: entitlement?.expiresAt || '', freeEditableLimit: 1 } });
+    res.json({ rooms, admin, subscription: { premium: developer || Boolean(entitlement), founder: developer, expiresAt: developer ? '' : entitlement?.expiresAt || '', freeEditableLimit: 1 } });
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : 'Không đọc được phòng voice.' });
   }
@@ -486,15 +571,18 @@ app.get('/api/guilds/:guildId/members', requireAuth, async (req: AuthRequest, re
   const guildId = String(req.params.guildId);
   if (!requireGuildAdmin(req, res, guildId)) return;
   try {
-    const paidSummary = await store.getPaidUserSummary(guildId);
+    const developer = isDeveloper(req.authSession);
+    const paidSummary = developer ? await store.getPaidUserSummary(guildId) : {};
     const entitlements = await store.listEntitlements(guildId);
     const activeByUser = new Set(entitlements.filter((item) => item.status === 'active' && (!item.expiresAt || new Date(item.expiresAt).getTime() > Date.now())).map((item) => item.discordUserId));
     const members = await bot.listGuildMembers(guildId, String(req.query.refresh || '') === '1');
     res.json({
+      canManageMoney: developer,
       members: members.map((member) => {
-        const payment = paidSummary[member.id] || { paidCount: 0, paidTotalVnd: 0, lastPaidAt: '' };
-        const premium = activeByUser.has(member.id);
-        return { ...member, premium, paid: payment.paidCount > 0, payment };
+        const payment = developer ? paidSummary[member.id] || { paidCount: 0, paidTotalVnd: 0, lastPaidAt: '' } : { paidCount: 0, paidTotalVnd: 0, lastPaidAt: '' };
+        const founder = config.developerIds.includes(member.id);
+        const premium = founder || activeByUser.has(member.id);
+        return { ...member, founder, premium, paid: developer && payment.paidCount > 0, payment };
       }),
     });
   } catch (error) {
@@ -504,7 +592,7 @@ app.get('/api/guilds/:guildId/members', requireAuth, async (req: AuthRequest, re
 
 app.post('/api/guilds/:guildId/payment-panel', requireAuth, async (req: AuthRequest, res: Response) => {
   const guildId = String(req.params.guildId);
-  if (!requireGuildAdmin(req, res, guildId)) return;
+  if (!requireDeveloper(req, res)) return;
   const guild = (req.authSession?.guilds || []).find((item) => item.id === guildId);
   const discordGuild = bot.client.guilds.cache.get(guildId);
   if (!discordGuild) {
@@ -559,9 +647,9 @@ app.get('/api/public/payments/:paymentId', requireAuth, async (req: AuthRequest,
     res.status(404).json({ error: 'PAYMENT_NOT_FOUND' });
     return;
   }
-  const admin = canManageGuild(req, payment.guildId);
+  const developer = canManageMoney(req);
   const owner = payment.discordUserId === req.authSession!.user.id;
-  if (!admin && !owner) {
+  if (!developer && !owner) {
     res.status(403).json({ error: 'PAYMENT_FORBIDDEN' });
     return;
   }

@@ -100,9 +100,16 @@ Bot không dùng control channel, payment channel hay system channel thay thế 
 
 Member bình thường không cần slash command để tạo phòng; chỉ click voice trigger và dùng button panel.
 
-## 2. Cấu hình Dashboard
+## 2. Phân quyền Dashboard
 
-Đăng nhập bằng Discord OAuth và chọn server mà bot đang hoạt động. Member thấy **Cửa hàng** và **Phòng đang mở** nhưng API chỉ trả các phòng member đó đang host. Account có `Administrator` hoặc là owner thấy toàn bộ Control Center và quản lý tất cả phòng trong server.
+Cấu hình Discord User ID của hai developer trong `.env`:
+
+```env
+DEV_DANTE=DISCORD_USER_ID
+DEV_TIRA=DISCORD_USER_ID
+```
+
+Developer thấy toàn bộ server bot đang kết nối, Study Voice System, tổng doanh thu, donate, payment ledger, Premium products, SePay và integration settings. Founder developer luôn được tính là Premium không giới hạn và không hết hạn, nhưng vẫn có thể tự mua gói hoặc donate trong shop để kiểm thử luồng thanh toán. Trong trang Thành viên, developer có thể cấp Premium theo số ngày, gia hạn cộng thêm ngày, cấp không thời hạn hoặc thu hồi entitlement của bất kỳ member nào. Server admin chỉ quản lý creator voice, phòng và member trong những server mà account có quyền Administrator. Member thường chỉ thấy Cửa hàng và các phòng mình đang host. Các API tài chính đều kiểm tra developer ID ở backend, không chỉ ẩn menu bằng CSS.
 
 ### Thành viên server
 

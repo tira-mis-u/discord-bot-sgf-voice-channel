@@ -31,8 +31,12 @@ import type { PaymentCreationResult } from './services/payment-service.js';
 import { formatVnd } from './utils.js';
 import { createDonationPayment, createProductPayment, settleSepayWebhook } from './services/payment-service.js';
 
+function isDeveloperUser(userId: string): boolean {
+  return config.developerIds.includes(userId);
+}
+
 function isAdmin(interaction: Interaction): boolean {
-  return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.Administrator));
+  return isDeveloperUser(interaction.user.id) || Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.Administrator));
 }
 
 function displayName(member: GuildMember): string {
@@ -233,9 +237,13 @@ export class SgfBot {
     }
     if (interaction.commandName !== 'sgf') return;
     const subcommand = interaction.options.getSubcommand();
-    const adminOnly = ['setup', 'panel', 'status', 'sync'].includes(subcommand);
-    if (adminOnly && !isAdmin(interaction)) {
-      await interaction.reply({ content: 'Lệnh này chỉ dành cho admin server.', ephemeral: true });
+    const developerOnly = ['panel', 'status', 'sync'].includes(subcommand);
+    if (developerOnly && !isDeveloperUser(interaction.user.id)) {
+      await interaction.reply({ content: 'Lệnh này chỉ dành cho Study Voice developers.', ephemeral: true });
+      return;
+    }
+    if (subcommand === 'setup' && !isAdmin(interaction)) {
+      await interaction.reply({ content: 'Lệnh setup chỉ dành cho admin server hoặc Study Voice developers.', ephemeral: true });
       return;
     }
 
@@ -248,14 +256,15 @@ export class SgfBot {
     if (subcommand === 'premium') {
       const products = await store.listProducts(interaction.guild.id, true);
       const row = this.paymentButtonRow(products);
-      const entitlement = await store.getEntitlement(interaction.guild.id, interaction.user.id);
+      const founder = isDeveloperUser(interaction.user.id);
+      const entitlement = founder ? undefined : await store.getEntitlement(interaction.guild.id, interaction.user.id);
       const embed = new EmbedBuilder()
         .setColor(0x5865f2)
         .setAuthor({ name: interaction.guild.name, iconURL: interaction.guild.iconURL() || undefined })
         .setTitle('Premium và Donate')
         .setDescription(products.length ? 'Premium cho phép host mở không giới hạn phòng editable. Bản miễn phí được giữ 1 phòng editable trên mỗi server.' : 'Server chưa mở bán gói Premium. Bạn vẫn có thể chọn Donate để ủng hộ.')
         .addFields(
-          { name: 'Trạng thái của bạn', value: entitlement ? `Premium đến **${entitlement.expiresAt ? new Date(entitlement.expiresAt).toLocaleDateString('vi-VN') : 'vĩnh viễn'}**` : 'Free - 1 phòng editable trên mỗi server', inline: false },
+          { name: 'Trạng thái của bạn', value: founder ? 'Founder Premium không giới hạn và không hết hạn' : entitlement ? `Premium đến **${entitlement.expiresAt ? new Date(entitlement.expiresAt).toLocaleDateString('vi-VN') : 'vĩnh viễn'}**` : 'Free - 1 phòng editable trên mỗi server', inline: false },
           { name: 'Gia hạn', value: 'Thanh toán sớm sẽ cộng thêm thời gian kể từ ngày hết hạn hiện tại.', inline: false },
         )
         .setFooter({ text: 'Bot sẽ nhắc gia hạn trước 3 ngày' })
@@ -331,8 +340,9 @@ export class SgfBot {
     const joinLeaveLog = interaction.options.getBoolean('join_leave_log');
     const autoHost = interaction.options.getBoolean('auto_host');
     const patch: Partial<GuildSettings> = {};
+    const developer = isDeveloperUser(interaction.user.id);
     if (controlChannel) patch.controlChannelId = controlChannel.id;
-    if (paymentChannel) patch.paymentPanelChannelId = paymentChannel.id;
+    if (developer && paymentChannel) patch.paymentPanelChannelId = paymentChannel.id;
     if (premiumRole) patch.premiumRoleId = premiumRole.id;
     const guildCreatorChannel = creatorChannel ? interaction.guild!.channels.cache.get(creatorChannel.id) : undefined;
     if (guildCreatorChannel?.type === ChannelType.GuildVoice) {
@@ -411,7 +421,7 @@ export class SgfBot {
     if (cache.backend !== 'memory' && !await cache.setIfAbsent(distributedLockKey, '1', 20)) return;
     this.creatingOwners.add(key);
     try {
-      if (creator.allowedRoleId && !member.roles.cache.has(creator.allowedRoleId) && !member.permissions.has(PermissionFlagsBits.Administrator)) {
+      if (creator.allowedRoleId && !isDeveloperUser(member.id) && !member.roles.cache.has(creator.allowedRoleId) && !member.permissions.has(PermissionFlagsBits.Administrator)) {
         await member.send(`Bạn cần role <@&${creator.allowedRoleId}> để dùng creator **${creator.label}** trong **${member.guild.name}**.`).catch(() => undefined);
         if (previousChannelId) await member.voice.setChannel(previousChannelId, 'Thiếu role để tạo phòng').catch(() => undefined);
         else await member.voice.disconnect('Thiếu role để tạo phòng').catch(() => undefined);
@@ -571,11 +581,12 @@ export class SgfBot {
   }
 
   private async isPremium(member: GuildMember, _settings: GuildSettings): Promise<boolean> {
+    if (isDeveloperUser(member.id)) return true;
     return store.hasActiveEntitlement(member.guild.id, member.id);
   }
 
   private async canReceiveOwnership(room: Room, member: GuildMember): Promise<boolean> {
-    if (room.mode !== 'editable' || await store.hasActiveEntitlement(member.guild.id, member.id)) return true;
+    if (room.mode !== 'editable' || isDeveloperUser(member.id) || await store.hasActiveEntitlement(member.guild.id, member.id)) return true;
     const ownedRooms = await store.listRoomsByOwner(member.guild.id, member.id);
     return !ownedRooms.some((ownedRoom) => ownedRoom.mode === 'editable' && ownedRoom.channelId !== room.channelId && member.guild.channels.cache.get(ownedRoom.channelId)?.isVoiceBased());
   }
@@ -927,6 +938,43 @@ export class SgfBot {
     if (payment.qrUrl) embed.setImage(payment.qrUrl);
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setLabel('Mở trang thanh toán').setStyle(ButtonStyle.Link).setURL(payment.checkoutUrl));
     return { content: 'Đây là tin nhắn riêng chỉ bạn nhìn thấy.', embeds: [embed], components: [row] };
+  }
+
+  async manageManualPremium(input: { guildId: string; userId: string; action: 'grant' | 'extend' | 'revoke'; days: number; developerId: string; note?: string }) {
+    if (!isDeveloperUser(input.developerId)) throw new Error('Chỉ Study Voice developers được quản lý Premium thủ công.');
+    const guild = this.client.guilds.cache.get(input.guildId);
+    if (!guild) throw new Error('Bot chưa kết nối server này.');
+    const member = await guild.members.fetch(input.userId).catch(() => null);
+    if (!member) throw new Error('Không tìm thấy member trong server.');
+    const settings = await store.getSettings(input.guildId, guild.name);
+    const roleId = settings.premiumRoleId;
+
+    if (input.action === 'revoke') {
+      await store.revokeUserEntitlements(input.guildId, input.userId, input.developerId);
+      if (roleId && !isDeveloperUser(input.userId)) await member.roles.remove(roleId, `Premium revoked by developer ${input.developerId}`).catch(() => undefined);
+      return { action: 'revoke', founder: isDeveloperUser(input.userId), entitlement: undefined, message: isDeveloperUser(input.userId) ? 'Đã thu hồi entitlement, nhưng tài khoản founder vẫn luôn có đặc quyền Premium.' : 'Đã thu hồi Premium.' };
+    }
+
+    const entitlement = await store.grantManualEntitlement({
+      guildId: input.guildId,
+      discordUserId: input.userId,
+      roleId,
+      days: Math.max(0, Math.round(input.days)),
+      extend: input.action === 'extend',
+      grantedBy: input.developerId,
+      note: input.note || `Manual ${input.action} by Study Voice developer`,
+    });
+    if (roleId) await member.roles.add(roleId, `Premium ${input.action} by developer ${input.developerId}`).catch(() => undefined);
+    return { action: input.action, founder: isDeveloperUser(input.userId), entitlement, message: entitlement.expiresAt ? `Premium có hiệu lực đến ${new Date(entitlement.expiresAt).toLocaleString('vi-VN')}.` : 'Đã cấp Premium không thời hạn.' };
+  }
+
+  listConnectedGuilds(): Array<{ id: string; name: string; icon: string; memberCount: number }> {
+    return [...this.client.guilds.cache.values()].map((guild) => ({
+      id: guild.id,
+      name: guild.name,
+      icon: guild.icon || '',
+      memberCount: guild.memberCount,
+    })).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async listGuildMembers(guildId: string, force = false): Promise<GuildMemberView[]> {

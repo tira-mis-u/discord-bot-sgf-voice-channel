@@ -35,6 +35,7 @@ export const config = {
     upstashRestUrl: textFromEnv('UPSTASH_REDIS_REST_URL'),
     upstashRestToken: textFromEnv('UPSTASH_REDIS_REST_TOKEN'),
   },
+  developerIds: [textFromEnv('DEV_DANTE'), textFromEnv('DEV_TIRA')].filter(Boolean),
   sessionSecret: textFromEnv('SESSION_SECRET', 'dev-only-session-secret'),
   discord: {
     token: textFromEnv('DISCORD_TOKEN'),
