@@ -11,12 +11,30 @@ function textFromEnv(name: string, fallback = ''): string {
 }
 
 const publicUrl = textFromEnv('PUBLIC_URL', 'http://localhost:3000').replace(/\/$/, '');
+const isVercel = Boolean(process.env.VERCEL);
+const configuredDbFile = textFromEnv('DB_FILE', './data/sgf.sqlite');
+const dbFile = isVercel && !configuredDbFile.startsWith('/tmp/')
+  ? `/tmp/${configuredDbFile.split(/[\\/]/).pop() || 'sgf.sqlite'}`
+  : configuredDbFile;
 
 export const config = {
   nodeEnv: textFromEnv('NODE_ENV', 'development'),
   port: numberFromEnv(process.env.PORT, 3000),
   publicUrl,
-  dbFile: textFromEnv('DB_FILE', './data/sgf.sqlite'),
+  isVercel,
+  dbFile,
+  databasePersistence: isVercel ? 'ephemeral' as const : 'persistent' as const,
+  databaseUrl: textFromEnv('DATABASE_URL'),
+  directDatabaseUrl: textFromEnv('DIRECT_DATABASE_URL'),
+  supabase: {
+    url: textFromEnv('SUPABASE_URL'),
+    serviceRoleKey: textFromEnv('SUPABASE_SERVICE_ROLE_KEY'),
+  },
+  redis: {
+    url: textFromEnv('REDIS_URL'),
+    upstashRestUrl: textFromEnv('UPSTASH_REDIS_REST_URL'),
+    upstashRestToken: textFromEnv('UPSTASH_REDIS_REST_TOKEN'),
+  },
   sessionSecret: textFromEnv('SESSION_SECRET', 'dev-only-session-secret'),
   discord: {
     token: textFromEnv('DISCORD_TOKEN'),

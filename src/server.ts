@@ -211,7 +211,15 @@ app.post('/auth/logout', (req: AuthRequest, res: Response) => {
   res.json({ ok: true });
 });
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'sgf-discord-bot', time: new Date().toISOString() }));
+app.get('/api/health', (_req, res) => res.json({
+  ok: true,
+  service: 'sgf-discord-bot',
+  databasePersistence: config.databasePersistence,
+  postgresConfigured: Boolean(config.databaseUrl),
+  redisConfigured: Boolean(config.redis.url || (config.redis.upstashRestUrl && config.redis.upstashRestToken)),
+  vercel: config.isVercel,
+  time: new Date().toISOString(),
+}));
 
 app.get('/api/runtime', (_req, res) => {
   const permissions = 288377872;

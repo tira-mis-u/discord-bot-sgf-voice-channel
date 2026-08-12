@@ -28,6 +28,8 @@ npm run dev
 
 Mở `http://localhost:3000`. Database local nằm ở `data/sgf.sqlite`. Ứng dụng không tạo tài khoản Discord giả và luôn yêu cầu OAuth thật.
 
+Không deploy toàn bộ service lên Vercel: Discord Gateway cần process chạy liên tục, còn Vercel Functions stateless và filesystem read-only. Khi phát hiện Vercel, code dùng `/tmp/sgf.sqlite` chỉ để tránh crash lúc khởi động; dữ liệu đó không persistent. Xem `DEPLOYMENT.md`.
+
 ## 1. Tạo Discord application
 
 ### Sửa lỗi `OAuth2 redirect_uri không hợp lệ`

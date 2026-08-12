@@ -2,6 +2,20 @@
 
 Có thể chạy bot và dashboard dưới subdomain, ví dụ `bot.sgf.vn`. Domain SGF chính chỉ cần gọi read API bằng server-to-server secret.
 
+## Không deploy toàn bộ Discord bot lên Vercel
+
+Vercel Functions có filesystem read-only và chỉ cho ghi tạm vào `/tmp`. Code tự chuyển SQLite sang `/tmp` khi phát hiện `VERCEL=1` để tránh lỗi `mkdir '/var/task/data'`, nhưng database này là **ephemeral** và có thể mất giữa các invocation.
+
+Quan trọng hơn, Discord Gateway cần một process chạy liên tục. Vercel Functions là stateless và có thời gian chạy giới hạn, nên không phù hợp để giữ bot online, nhận voice-state events hoặc chạy maintenance timer.
+
+Kiến trúc production đề xuất:
+
+- chạy bot + Express API trên Railway, Render, Fly.io, VPS hoặc container luôn bật;
+- dùng Supabase PostgreSQL làm database persistent sau khi hoàn tất migration;
+- Vercel chỉ dùng cho frontend tĩnh nếu muốn, và frontend gọi backend bot qua HTTPS.
+
+Không sử dụng SQLite `/tmp` cho payment, entitlement, OAuth session hoặc cấu hình server production.
+
 ## Option A: Docker Compose
 
 ### `docker-compose.yml`

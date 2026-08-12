@@ -19,6 +19,9 @@ import type {
 
 const dbPath = path.resolve(config.dbFile);
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+if (config.databasePersistence === 'ephemeral') {
+  console.warn(`[db] Vercel detected. SQLite is using temporary storage at ${dbPath}; data can disappear between invocations. Configure external PostgreSQL before production use.`);
+}
 const sqlite = new Database(dbPath);
 sqlite.pragma('journal_mode = WAL');
 sqlite.pragma('foreign_keys = ON');
