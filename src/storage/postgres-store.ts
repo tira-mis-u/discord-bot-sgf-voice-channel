@@ -71,7 +71,7 @@ function rowToProduct(row: Record<string, unknown>): Product {
 function rowToRoom(row: Record<string, unknown>): Room {
   return {
     id: String(row.id), guildId: String(row.guild_id), channelId: String(row.channel_id), ownerId: String(row.owner_id),
-    ownerTag: String(row.owner_tag), mode: String(row.mode) === 'basic' ? 'basic' : 'editable', creatorChannelId: String(row.creator_channel_id),
+    ownerTag: String(row.owner_tag), originalOwnerId: String(row.original_owner_id || row.owner_id || ''), mode: String(row.mode) === 'basic' ? 'basic' : 'editable', creatorChannelId: String(row.creator_channel_id),
     controlMessageId: String(row.control_message_id || ''), notifyJoinLeave: Boolean(row.notify_join_leave), passwordHash: String(row.password_hash || ''),
     passwordSalt: String(row.password_salt || ''), createdAt: iso(row.created_at),
   };
@@ -187,16 +187,16 @@ export const postgresStore = {
 
   async insertRoom(input: Omit<Room, 'id' | 'createdAt'>): Promise<Room> {
     const roomId = id();
-    await sql`insert into public.rooms (id,guild_id,channel_id,owner_id,owner_tag,mode,creator_channel_id,control_message_id,notify_join_leave,password_hash,password_salt,created_at)
-      values (${roomId}::uuid,${input.guildId},${input.channelId},${input.ownerId},${input.ownerTag},${input.mode},${input.creatorChannelId},${input.controlMessageId},${input.notifyJoinLeave},${input.passwordHash},${input.passwordSalt},now())`;
+    await sql`insert into public.rooms (id,guild_id,channel_id,owner_id,owner_tag,original_owner_id,mode,creator_channel_id,control_message_id,notify_join_leave,password_hash,password_salt,created_at)
+      values (${roomId}::uuid,${input.guildId},${input.channelId},${input.ownerId},${input.ownerTag},${input.originalOwnerId || input.ownerId},${input.mode},${input.creatorChannelId},${input.controlMessageId},${input.notifyJoinLeave},${input.passwordHash},${input.passwordSalt},now())`;
     return (await this.getRoomByChannel(input.channelId))!;
   },
 
-  async updateRoom(channelId: string, patch: Partial<Pick<Room, 'controlMessageId' | 'ownerId' | 'ownerTag' | 'mode' | 'notifyJoinLeave' | 'passwordHash' | 'passwordSalt'>>): Promise<Room | undefined> {
+  async updateRoom(channelId: string, patch: Partial<Pick<Room, 'controlMessageId' | 'ownerId' | 'ownerTag' | 'originalOwnerId' | 'mode' | 'notifyJoinLeave' | 'passwordHash' | 'passwordSalt'>>): Promise<Room | undefined> {
     const current = await this.getRoomByChannel(channelId);
     if (!current) return undefined;
     const next = { ...current, ...patch };
-    await sql`update public.rooms set owner_id=${next.ownerId},owner_tag=${next.ownerTag},mode=${next.mode},control_message_id=${next.controlMessageId},notify_join_leave=${next.notifyJoinLeave},password_hash=${next.passwordHash},password_salt=${next.passwordSalt} where channel_id=${channelId}`;
+    await sql`update public.rooms set owner_id=${next.ownerId},owner_tag=${next.ownerTag},original_owner_id=${next.originalOwnerId || next.ownerId},mode=${next.mode},control_message_id=${next.controlMessageId},notify_join_leave=${next.notifyJoinLeave},password_hash=${next.passwordHash},password_salt=${next.passwordSalt} where channel_id=${channelId}`;
     return this.getRoomByChannel(channelId);
   },
 
@@ -222,6 +222,11 @@ export const postgresStore = {
 
   async listRooms(guildId: string): Promise<Room[]> {
     const rows = await sql`select * from public.rooms where guild_id=${guildId} order by created_at desc`;
+    return rows.map((row) => rowToRoom(row));
+  },
+
+  async listAllRooms(): Promise<Room[]> {
+    const rows = await sql`select * from public.rooms order by created_at asc`;
     return rows.map((row) => rowToRoom(row));
   },
 

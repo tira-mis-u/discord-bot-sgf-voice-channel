@@ -50,6 +50,8 @@ export interface Room {
   channelId: string;
   ownerId: string;
   ownerTag: string;
+  /** Người tạo phòng ban đầu. Khi họ quay lại voice, host được trả về cho họ. */
+  originalOwnerId: string;
   mode: CreatorMode;
   creatorChannelId: string;
   controlMessageId: string;

@@ -12,7 +12,7 @@ await bot.start();
 
 const shutdown = async (signal: string) => {
   console.log(`[app] ${signal} received, shutting down`);
-  bot.client.destroy();
+  await bot.stop();
   await Promise.allSettled([closeDatabase(), cache.close()]);
   process.exit(0);
 };

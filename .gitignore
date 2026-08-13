@@ -5,3 +5,5 @@ data/*.sqlite-*
 .env
 .DS_Store
 npm-debug.log*
+scripts/
+FIXES.md

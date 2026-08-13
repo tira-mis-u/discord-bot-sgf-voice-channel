@@ -161,6 +161,8 @@ ensureColumn('guild_settings', 'sepay_bank_account_id', "TEXT NOT NULL DEFAULT '
 ensureColumn('rooms', 'notify_join_leave', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('rooms', 'password_hash', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('rooms', 'password_salt', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('rooms', 'original_owner_id', "TEXT NOT NULL DEFAULT ''");
+sqlite.prepare("UPDATE rooms SET original_owner_id = owner_id WHERE original_owner_id = ''").run();
 ensureColumn('entitlements', 'granted_by', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('entitlements', 'grant_note', "TEXT NOT NULL DEFAULT ''");
 sqlite.prepare('UPDATE products SET duration_days = 30 WHERE duration_days <= 0').run();
@@ -232,6 +234,7 @@ function rowToRoom(row: Record<string, unknown>): Room {
     channelId: String(row.channel_id),
     ownerId: String(row.owner_id),
     ownerTag: String(row.owner_tag),
+    originalOwnerId: String(row.original_owner_id || row.owner_id || ''),
     mode: String(row.mode) === 'editable' || String(row.mode) === 'premium' ? 'editable' : 'basic',
     creatorChannelId: String(row.creator_channel_id),
     controlMessageId: String(row.control_message_id || ''),
@@ -366,17 +369,17 @@ export const sqliteStore = {
     const timestamp = now();
     const roomId = id();
     sqlite.prepare(`
-      INSERT INTO rooms (id, guild_id, channel_id, owner_id, owner_tag, mode, creator_channel_id, control_message_id, notify_join_leave, password_hash, password_salt, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(roomId, input.guildId, input.channelId, input.ownerId, input.ownerTag, input.mode, input.creatorChannelId, input.controlMessageId, input.notifyJoinLeave ? 1 : 0, input.passwordHash, input.passwordSalt, timestamp);
+      INSERT INTO rooms (id, guild_id, channel_id, owner_id, owner_tag, original_owner_id, mode, creator_channel_id, control_message_id, notify_join_leave, password_hash, password_salt, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(roomId, input.guildId, input.channelId, input.ownerId, input.ownerTag, input.originalOwnerId || input.ownerId, input.mode, input.creatorChannelId, input.controlMessageId, input.notifyJoinLeave ? 1 : 0, input.passwordHash, input.passwordSalt, timestamp);
     return this.getRoomByChannel(input.channelId)!;
   },
 
-  updateRoom(channelId: string, patch: Partial<Pick<Room, 'controlMessageId' | 'ownerId' | 'ownerTag' | 'mode' | 'notifyJoinLeave' | 'passwordHash' | 'passwordSalt'>>): Room | undefined {
+  updateRoom(channelId: string, patch: Partial<Pick<Room, 'controlMessageId' | 'ownerId' | 'ownerTag' | 'originalOwnerId' | 'mode' | 'notifyJoinLeave' | 'passwordHash' | 'passwordSalt'>>): Room | undefined {
     const current = this.getRoomByChannel(channelId);
     if (!current) return undefined;
     const next = { ...current, ...patch };
-    sqlite.prepare('UPDATE rooms SET owner_id = ?, owner_tag = ?, mode = ?, control_message_id = ?, notify_join_leave = ?, password_hash = ?, password_salt = ? WHERE channel_id = ?').run(next.ownerId, next.ownerTag, next.mode, next.controlMessageId, next.notifyJoinLeave ? 1 : 0, next.passwordHash, next.passwordSalt, channelId);
+    sqlite.prepare('UPDATE rooms SET owner_id = ?, owner_tag = ?, original_owner_id = ?, mode = ?, control_message_id = ?, notify_join_leave = ?, password_hash = ?, password_salt = ? WHERE channel_id = ?').run(next.ownerId, next.ownerTag, next.originalOwnerId || next.ownerId, next.mode, next.controlMessageId, next.notifyJoinLeave ? 1 : 0, next.passwordHash, next.passwordSalt, channelId);
     return this.getRoomByChannel(channelId);
   },
 
@@ -401,6 +404,10 @@ export const sqliteStore = {
 
   listRooms(guildId: string): Room[] {
     return (sqlite.prepare('SELECT * FROM rooms WHERE guild_id = ? ORDER BY created_at DESC').all(guildId) as Record<string, unknown>[]).map(rowToRoom);
+  },
+
+  listAllRooms(): Room[] {
+    return (sqlite.prepare('SELECT * FROM rooms ORDER BY created_at ASC').all() as Record<string, unknown>[]).map(rowToRoom);
   },
 
   grantRoomAccess(roomId: string, userId: string): void {
