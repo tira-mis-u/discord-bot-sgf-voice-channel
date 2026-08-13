@@ -1,17 +1,17 @@
 import type { Client, GuildMember } from 'discord.js';
 import { config } from '../config.js';
-import { cache } from '../cache.js';
 import { store } from '../db.js';
 import type { Payment, Product, SepayWebhookPayload } from '../types.js';
 import { formatVnd } from '../utils.js';
 import { buildPaymentQr, createOrderCode, extractOrderCode, isIncoming, normalizeText, webhookAmount, webhookTransactionId } from './sepay.js';
-import { findSepayTransactions, isSepayApiConfigured, transactionToWebhookPayload } from './sepay-api.js';
+import { resolveSepayBankAccount } from './sepay-api.js';
 
 export interface PaymentCreationResult {
   payment: Payment;
   product?: Product;
   qrDynamic: boolean;
   bankCode: string;
+  bankName: string;
   accountNumber: string;
   accountName: string;
 }
@@ -22,15 +22,17 @@ export function makeCheckoutUrl(paymentId: string): string {
 
 async function paymentDetails(guildId: string, amount: number, type: 'product' | 'donation', note = '') {
   const settings = await store.getSettings(guildId);
+  const account = await resolveSepayBankAccount(settings);
   const orderCode = createOrderCode(type);
-  const qr = buildPaymentQr(settings, amount, orderCode);
+  const qr = buildPaymentQr(settings, amount, orderCode, account);
   return {
     settings,
     orderCode,
     qr,
-    bankCode: settings.bankCode || config.sepay.bankCode,
-    accountNumber: settings.bankAccountNumber || config.sepay.accountNumber,
-    accountName: settings.bankAccountName || config.sepay.accountName,
+    bankCode: account.bankCode,
+    bankName: account.bankName,
+    accountNumber: account.accountNumber,
+    accountName: account.accountName,
     note,
   };
 }
@@ -54,7 +56,7 @@ export async function createProductPayment(input: { guildId: string; userId: str
   });
   await store.updatePaymentCheckout(payment.id, makeCheckoutUrl(payment.id));
   const withUrl = (await store.getPayment(payment.id))!;
-  return { payment: withUrl, product, qrDynamic: details.qr.dynamic, bankCode: details.bankCode, accountNumber: details.accountNumber, accountName: details.accountName };
+  return { payment: withUrl, product, qrDynamic: details.qr.dynamic, bankCode: details.bankCode, bankName: details.bankName, accountNumber: details.accountNumber, accountName: details.accountName };
 }
 
 export async function createDonationPayment(input: { guildId: string; userId: string; userTag: string; amountVnd: number; note?: string }): Promise<PaymentCreationResult> {
@@ -74,7 +76,7 @@ export async function createDonationPayment(input: { guildId: string; userId: st
   });
   const responsePayment = { ...payment, checkoutUrl: makeCheckoutUrl(payment.id) };
   await store.updatePaymentCheckout(payment.id, makeCheckoutUrl(payment.id));
-  return { payment: responsePayment, qrDynamic: details.qr.dynamic, bankCode: details.bankCode, accountNumber: details.accountNumber, accountName: details.accountName };
+  return { payment: responsePayment, qrDynamic: details.qr.dynamic, bankCode: details.bankCode, bankName: details.bankName, accountNumber: details.accountNumber, accountName: details.accountName };
 }
 
 export function calculateExpiry(durationDays: number, previousExpiry = ''): string {
@@ -143,70 +145,6 @@ export async function settleSepayWebhook(client: Client, payload: SepayWebhookPa
   }
   await notifySgf(paid);
   return { ok: true, matched: true, payment: paid, message };
-}
-
-export interface ReconciliationResult {
-  configured: boolean;
-  checked: boolean;
-  matched: boolean;
-  message: string;
-  checkedAt: string;
-}
-
-const reconciliationCache = new Map<string, { at: number; result: ReconciliationResult }>();
-const reconciliationInFlight = new Map<string, Promise<ReconciliationResult>>();
-
-export async function reconcilePendingPayment(client: Client, paymentId: string, force = false): Promise<ReconciliationResult> {
-  const payment = await store.getPayment(paymentId);
-  const checkedAt = new Date().toISOString();
-  if (!isSepayApiConfigured()) return { configured: false, checked: false, matched: false, message: 'Chưa cấu hình SEPAY_API_TOKEN.', checkedAt };
-  if (!payment) return { configured: true, checked: false, matched: false, message: 'Không tìm thấy đơn thanh toán.', checkedAt };
-  if (payment.status !== 'pending') return { configured: true, checked: false, matched: payment.status === 'paid', message: `Đơn đang ở trạng thái ${payment.status}.`, checkedAt };
-
-  const reconciliationKey = `sepay-reconciliation:${paymentId}`;
-  if (!force && cache.backend !== 'memory') {
-    const distributedCached = await cache.getJson<ReconciliationResult>(reconciliationKey);
-    if (distributedCached) return distributedCached;
-  }
-  const cached = reconciliationCache.get(paymentId);
-  if (!force && cached && Date.now() - cached.at < 15_000) return cached.result;
-  const running = reconciliationInFlight.get(paymentId);
-  if (running) return running;
-  const lockKey = `sepay-lock:${paymentId}`;
-  if (cache.backend !== 'memory' && !await cache.setIfAbsent(lockKey, '1', 15)) {
-    return { configured: true, checked: false, matched: false, message: 'Một worker khác đang đối soát đơn này.', checkedAt };
-  }
-
-  const task = (async () => {
-    try {
-      const settings = await store.getSettings(payment.guildId);
-      const transactions = await findSepayTransactions({
-        orderCode: payment.orderCode,
-        expectedAmount: payment.expectedAmountVnd,
-        accountNumber: settings.bankAccountNumber || config.sepay.accountNumber,
-        createdAt: payment.createdAt,
-      });
-      for (const transaction of transactions) {
-        const result = await settleSepayWebhook(client, transactionToWebhookPayload(transaction));
-        if (result.matched) {
-          return { configured: true, checked: true, matched: true, message: `Đã đối soát bằng SePay API v2. ${result.message}`, checkedAt: new Date().toISOString() };
-        }
-      }
-      return { configured: true, checked: true, matched: false, message: 'SePay API chưa tìm thấy giao dịch khớp mã đơn và số tiền.', checkedAt: new Date().toISOString() };
-    } catch (error) {
-      return { configured: true, checked: true, matched: false, message: error instanceof Error ? error.message : 'Đối soát SePay API thất bại.', checkedAt: new Date().toISOString() };
-    }
-  })();
-  reconciliationInFlight.set(paymentId, task);
-  try {
-    const result = await task;
-    reconciliationCache.set(paymentId, { at: Date.now(), result });
-    if (cache.backend !== 'memory') await cache.setJson(reconciliationKey, result, 15);
-    return result;
-  } finally {
-    reconciliationInFlight.delete(paymentId);
-    if (cache.backend !== 'memory') await cache.del(lockKey);
-  }
 }
 
 async function notifySgf(payment: Payment): Promise<void> {

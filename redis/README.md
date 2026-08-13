@@ -25,7 +25,6 @@ If both are configured, `REDIS_URL` is preferred. If neither is configured, the 
 - Discord member snapshots for five minutes.
 - Distributed room-creation locks.
 - Room-password attempt counters.
-- SePay reconciliation results and locks.
 
 ## Data kept in PostgreSQL
 

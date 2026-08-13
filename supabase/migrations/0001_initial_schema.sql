@@ -1,3 +1,5 @@
+-- begin;
+
 create table if not exists public.guild_settings (
   guild_id text primary key,
   guild_name text not null default '',
@@ -7,6 +9,7 @@ create table if not exists public.guild_settings (
   default_room_category_id text not null default '',
   room_name_template text not null default '{user}''s room',
   donation_min_vnd bigint not null default 1000 check (donation_min_vnd >= 1000),
+  sepay_bank_account_id text not null default '',
   bank_code text not null default '',
   bank_account_number text not null default '',
   bank_account_name text not null default '',
@@ -100,7 +103,9 @@ create table if not exists public.entitlements (
   discord_user_id text not null,
   product_id uuid references public.products(id) on delete set null,
   role_id text not null default '',
-  payment_id uuid not null references public.payments(id) on delete restrict,
+  payment_id uuid references public.payments(id) on delete restrict,
+  granted_by text not null default '',
+  grant_note text not null default '',
   status text not null default 'active' check (status in ('active', 'expired', 'revoked')),
   expires_at timestamptz,
   created_at timestamptz not null default now(),
@@ -153,3 +158,5 @@ alter table public.room_access enable row level security;
 alter table public.entitlement_notifications enable row level security;
 
 revoke all on all tables in schema public from anon, authenticated;
+
+commit;

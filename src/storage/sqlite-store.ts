@@ -37,6 +37,7 @@ sqlite.exec(`
     default_room_category_id TEXT NOT NULL DEFAULT '',
     room_name_template TEXT NOT NULL DEFAULT '{user}''s room',
     donation_min_vnd INTEGER NOT NULL DEFAULT 1000,
+    sepay_bank_account_id TEXT NOT NULL DEFAULT '',
     bank_code TEXT NOT NULL DEFAULT '',
     bank_account_number TEXT NOT NULL DEFAULT '',
     bank_account_name TEXT NOT NULL DEFAULT '',
@@ -156,6 +157,7 @@ function ensureColumn(table: string, column: string, definition: string): void {
   if (!columns.some((item) => item.name === column)) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
+ensureColumn('guild_settings', 'sepay_bank_account_id', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('rooms', 'notify_join_leave', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('rooms', 'password_hash', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('rooms', 'password_salt', "TEXT NOT NULL DEFAULT ''");
@@ -198,6 +200,7 @@ function rowToSettings(row: Record<string, unknown>): GuildSettings {
     defaultRoomCategoryId: String(row.default_room_category_id || ''),
     roomNameTemplate: String(row.room_name_template || "{user}'s room"),
     donationMinVnd: Number(row.donation_min_vnd || 1000),
+    sepayBankAccountId: String(row.sepay_bank_account_id || ''),
     bankCode: String(row.bank_code || ''),
     bankAccountNumber: String(row.bank_account_number || ''),
     bankAccountName: String(row.bank_account_name || ''),
@@ -301,7 +304,7 @@ export const sqliteStore = {
       UPDATE guild_settings SET
         guild_name = ?, creator_channels_json = ?, premium_role_id = ?, control_channel_id = ?,
         payment_panel_channel_id = ?, default_room_category_id = ?, room_name_template = ?,
-        donation_min_vnd = ?, bank_code = ?, bank_account_number = ?, bank_account_name = ?,
+        donation_min_vnd = ?, sepay_bank_account_id = ?, bank_code = ?, bank_account_number = ?, bank_account_name = ?,
         static_qr_url = ?, updated_at = ? WHERE guild_id = ?
     `).run(
       next.guildName,
@@ -312,6 +315,7 @@ export const sqliteStore = {
       next.defaultRoomCategoryId,
       next.roomNameTemplate,
       next.donationMinVnd,
+      next.sepayBankAccountId,
       next.bankCode,
       next.bankAccountNumber,
       next.bankAccountName,

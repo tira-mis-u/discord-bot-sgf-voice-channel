@@ -192,24 +192,18 @@ Trong SePay, tạo webhook với:
 - URL: `https://<domain-bot>/api/payments/sepay/webhook`
 - Event: giao dịch tiền vào (`In_only` nếu dashboard SePay có lựa chọn này)
 - Authentication: API Key
-- API key: điền vào `SEPAY_WEBHOOK_API_KEY`
+- API key: dùng cùng giá trị `SEPAY_API_KEY` nếu muốn chỉ quản lý một secret
 - Có thể bật bỏ qua giao dịch không có mã nếu muốn giảm noise
 
-Cấu hình thêm SePay API v2 để đối soát khi webhook chậm hoặc thất bại:
+Study Voice dùng `SEPAY_API_KEY` để gọi danh sách tài khoản ngân hàng đã liên kết. Bank code, số tài khoản và tên chủ tài khoản được lấy tự động rồi cache trong Redis 10 phút. Developer chỉ chọn tài khoản nhận tiền trong Dashboard, không phải nhập tay.
 
 ```env
-# Token tạo tại Company Settings → API Access. Không dùng token này làm webhook API key.
-SEPAY_API_TOKEN=your_64_character_api_token
-SEPAY_API_BASE_URL=https://userapi.sepay.vn/v2
+SEPAY_API_KEY=api_key_cua_ban
+# Chỉ điền khi webhook dùng key khác:
+SEPAY_WEBHOOK_API_KEY=
 ```
 
-Sandbox dùng `https://userapi-sandbox.sepay.vn/v2`. Biến cũ `SEPAY_ACCESS_TOKEN` vẫn được nhận làm alias, nhưng nên chuyển sang `SEPAY_API_TOKEN` cho đúng tên trong tài liệu SePay API v2.
-
-Bot gọi API bằng `Authorization: Bearer ...` hoàn toàn ở backend. Khi checkout đang `pending`, hệ thống tìm giao dịch theo mã đơn, tiền vào tối thiểu, ngày tạo và số tài khoản; kết quả vẫn đi qua cùng cơ chế idempotency của webhook trước khi đánh dấu `paid`. Mỗi đơn chỉ đối soát tối đa một lần/15 giây và client API có hàng đợi để không vượt giới hạn 3 request/giây của SePay.
-
-Webhook vẫn là luồng realtime được ưu tiên; API v2 là lớp kiểm tra/đối soát bổ sung. Admin có thể kiểm tra token và danh sách tài khoản đã liên kết trong Dashboard → **Tích hợp & nhận tiền**. Token không được trả về frontend hoặc ghi vào log.
-
-Có thể dùng tài khoản cá nhân/doanh nghiệp theo khả năng tài khoản SePay của bạn. Đừng commit `.env`, webhook key hoặc API token.
+API base URL được cố định trong backend nên không cần thêm biến môi trường. Checkout giữ trạng thái `pending` cho đến khi SePay gửi webhook hợp lệ có đúng mã đơn và số tiền. Không commit `.env` hoặc API key.
 
 ## 4. Tích hợp domain SGF
 
@@ -250,9 +244,8 @@ Bot sẽ POST event `payment.paid` kèm payment object và Bearer `SGF_INTEGRATI
 | `PUT` | `/api/guilds/:guildId/settings` | cấu hình từng creator và voice/payment |
 | `POST/PUT/DELETE` | `/api/guilds/:guildId/products...` | bảng giá |
 | `POST` | `/api/guilds/:guildId/payment-panel` | đăng button panel |
-| `POST` | `/api/payments/sepay/webhook` | SePay gọi vào realtime |
-| `GET` | `/api/guilds/:guildId/sepay-status` | admin kiểm tra kết nối API v2 và tài khoản đã liên kết |
-| `GET` | `/api/public/payments/:paymentId` | đọc trạng thái và tự đối soát API v2 khi đơn còn pending |
+| `POST` | `/api/payments/sepay/webhook` | SePay gửi giao dịch realtime |
+| `GET` | `/api/public/payments/:paymentId` | đọc trạng thái đơn trong database |
 | `GET` | `/api/integrations/sgf/payments` | SGF lấy donor/payment |
 | `GET` | `/api/integrations/sgf/entitlements` | SGF lấy role entitlement |
 
@@ -261,7 +254,7 @@ Bot sẽ POST event `payment.paid` kèm payment object và Bearer `SGF_INTEGRATI
 - [ ] `NODE_ENV=production`.
 - [ ] `PUBLIC_URL` là HTTPS thật.
 - [ ] OAuth redirect trên Discord khớp 100% với domain.
-- [ ] `SESSION_SECRET`, `SEPAY_WEBHOOK_API_KEY`, `SEPAY_API_TOKEN`, `SGF_INTEGRATION_SECRET` nằm trong `.env`/secret manager và không bị commit.
+- [ ] `SESSION_SECRET`, `SEPAY_API_KEY`, `SGF_INTEGRATION_SECRET` nằm trong `.env` hoặc secret manager và không bị commit.
 - [ ] Reverse proxy chuyển HTTPS về port Node, websocket không bắt buộc.
 - [ ] Volume persistent cho `data/sgf.sqlite` hoặc chuyển DB sang Postgres.
 - [ ] Backup database; không expose file SQLite.

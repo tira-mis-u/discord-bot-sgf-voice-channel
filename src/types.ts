@@ -22,6 +22,7 @@ export interface GuildSettings {
   defaultRoomCategoryId: string;
   roomNameTemplate: string;
   donationMinVnd: number;
+  sepayBankAccountId: string;
   bankCode: string;
   bankAccountNumber: string;
   bankAccountName: string;

@@ -176,8 +176,10 @@ export class SgfBot {
         await this.onInteraction(interaction);
       } catch (error) {
         console.error('[bot] interaction error', error);
-        if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-          await interaction.reply({ content: 'Có lỗi xảy ra, thử lại sau nhé.', ephemeral: Boolean(interaction.guild) }).catch(() => undefined);
+        if (interaction.isRepliable()) {
+          if (interaction.deferred) await interaction.editReply({ content: 'Có lỗi xảy ra, thử lại sau nhé.', components: [] }).catch(() => undefined);
+          else if (interaction.replied) await interaction.followUp({ content: 'Có lỗi xảy ra, thử lại sau nhé.', ephemeral: Boolean(interaction.guild) }).catch(() => undefined);
+          else await interaction.reply({ content: 'Có lỗi xảy ra, thử lại sau nhé.', ephemeral: Boolean(interaction.guild) }).catch(() => undefined);
         }
       }
     });
@@ -246,13 +248,15 @@ export class SgfBot {
       await interaction.reply({ content: 'Lệnh setup chỉ dành cho admin server hoặc Study Voice developers.', ephemeral: true });
       return;
     }
-
-    const settings = await store.getSettings(interaction.guild.id, interaction.guild.name);
-    if (subcommand === 'help') return this.sendHelp(interaction);
     if (subcommand === 'donate') {
       await interaction.showModal(this.donationModal());
       return;
     }
+
+    await interaction.deferReply({ ephemeral: true });
+    if (subcommand === 'help') return this.sendHelp(interaction);
+
+    const settings = await store.getSettings(interaction.guild.id, interaction.guild.name);
     if (subcommand === 'premium') {
       const products = await store.listProducts(interaction.guild.id, true);
       const row = this.paymentButtonRow(products);
@@ -269,7 +273,7 @@ export class SgfBot {
         )
         .setFooter({ text: 'Bot sẽ nhắc gia hạn trước 3 ngày' })
         .setTimestamp();
-      await interaction.reply({ ephemeral: true, embeds: [embed], components: row ? [row] : [] });
+      await interaction.editReply({ embeds: [embed], components: row ? [row] : [] });
       return;
     }
     if (subcommand === 'room') {
@@ -277,21 +281,21 @@ export class SgfBot {
       const currentRoom = currentChannelId ? await store.getRoomByChannel(currentChannelId) : undefined;
       const room = currentRoom?.ownerId === interaction.user.id ? currentRoom : await store.getRoomByOwner(interaction.guild.id, interaction.user.id);
       if (!room) {
-        await interaction.reply({ content: 'Bạn chưa host phòng tạm nào. Hãy vào creator voice channel trước.', ephemeral: true });
+        await interaction.editReply({ content: 'Bạn chưa host phòng tạm nào. Hãy vào creator voice channel trước.' });
         return;
       }
-      await interaction.reply({ content: `Bảng điều khiển cho <#${room.channelId}>`, embeds: [this.roomPanelEmbed(room)], components: this.roomButtonRows(room), ephemeral: true });
+      await interaction.editReply({ content: `Bảng điều khiển cho <#${room.channelId}>`, embeds: [this.roomPanelEmbed(room)], components: this.roomButtonRows(room) });
       return;
     }
     if (subcommand === 'setup') return this.runSetup(interaction, settings);
     if (subcommand === 'panel') {
       const result = await this.postPaymentPanel(interaction.guild, settings);
-      await interaction.reply({ content: result, ephemeral: true });
+      await interaction.editReply({ content: result });
       return;
     }
     if (subcommand === 'sync') {
       await this.registerSlashCommands(interaction.guild);
-      await interaction.reply({ content: 'Đã đồng bộ command `/sgf` và xóa các slash command cũ bị trùng.', ephemeral: true });
+      await interaction.editReply({ content: 'Đã đồng bộ command `/sgf` và xóa các slash command cũ bị trùng.' });
       return;
     }
     if (subcommand === 'status') {
@@ -307,7 +311,7 @@ export class SgfBot {
           { name: 'Dashboard', value: `[Mở Control Center](${config.publicUrl})`, inline: true },
         )
         .setTimestamp();
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.editReply({ embeds: [embed] });
     }
   }
 
@@ -327,7 +331,7 @@ export class SgfBot {
       .setFooter({ text: `SGF - ${interaction.guild?.name || 'Discord server'}` })
       .setTimestamp();
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setLabel('Mở Dashboard').setStyle(ButtonStyle.Link).setURL(config.publicUrl));
-    await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    await interaction.editReply({ embeds: [embed], components: [row] });
   }
 
   private async runSetup(interaction: ChatInputCommandInteraction, currentSettings: GuildSettings): Promise<void> {
@@ -380,7 +384,7 @@ export class SgfBot {
       new ButtonBuilder().setLabel('Mở Dashboard').setStyle(ButtonStyle.Link).setURL(config.publicUrl),
       new ButtonBuilder().setLabel('Tài liệu SePay').setStyle(ButtonStyle.Link).setURL('https://developer.sepay.vn/vi/sepay-webhooks/tao-qr-va-form-thanh-toan'),
     );
-    await interaction.reply({ embeds: [embed], components: [setupRow], ephemeral: true });
+    await interaction.editReply({ embeds: [embed], components: [setupRow] });
   }
 
   private async onVoiceStateUpdate(oldState: VoiceState, newState: VoiceState): Promise<void> {
@@ -694,11 +698,6 @@ export class SgfBot {
     const [namespace, action, value] = interaction.customId.split(':');
     if (namespace === 'room') return this.onRoomButton(interaction, action, value);
     if (namespace === 'roompass' && action === 'enter') {
-      const room = await store.getRoomByChannel(value);
-      if (!room) {
-        await interaction.reply({ content: 'Phòng không còn tồn tại.' });
-        return;
-      }
       const modal = new ModalBuilder().setCustomId(`roompassmodal:verify:${value}`).setTitle('Nhập mật khẩu phòng');
       modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('password').setLabel('Mật khẩu').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(64)));
       await interaction.showModal(modal);
@@ -708,25 +707,17 @@ export class SgfBot {
   }
 
   private async onRoomButton(interaction: ButtonInteraction, action: string, channelId: string): Promise<void> {
-    const room = await store.getRoomByChannel(channelId);
-    if (!room || !interaction.guild) {
-      await interaction.reply({ content: 'Phòng này không còn tồn tại.', ephemeral: Boolean(interaction.guild) });
-      return;
-    }
-    if (interaction.user.id !== room.ownerId && !isAdmin(interaction)) {
-      await interaction.reply({ content: 'Chỉ host hiện tại hoặc admin mới dùng được bảng này.', ephemeral: true });
-      return;
-    }
-    if (action !== 'delete' && room.mode !== 'editable') {
-      await interaction.reply({ content: 'Creator của phòng này được đặt ở chế độ không chỉnh sửa.', ephemeral: true });
+    if (!interaction.guild) {
+      await interaction.reply({ content: 'Hãy dùng panel này trong server Discord.' });
       return;
     }
     const channel = interaction.guild.channels.cache.get(channelId);
     if (!channel?.isVoiceBased()) {
-      await store.deleteRoomByChannel(channelId);
       await interaction.reply({ content: 'Kênh đã bị xóa.', ephemeral: true });
+      void store.deleteRoomByChannel(channelId);
       return;
     }
+
     if (action === 'rename' || action === 'limit' || action === 'password') {
       const titles = { rename: 'Đổi tên phòng', limit: 'Giới hạn thành viên', password: 'Mật khẩu phòng' } as const;
       const modal = new ModalBuilder().setCustomId(`roommodal:${action}:${channelId}`).setTitle(titles[action]);
@@ -745,12 +736,27 @@ export class SgfBot {
       await interaction.reply({ content: labels[action], components: [new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(select)], ephemeral: true });
       return;
     }
+
+    await interaction.deferReply({ ephemeral: true });
+    const room = await store.getRoomByChannel(channelId);
+    if (!room) {
+      await interaction.editReply({ content: 'Phòng này không còn tồn tại.' });
+      return;
+    }
+    if (interaction.user.id !== room.ownerId && !isAdmin(interaction)) {
+      await interaction.editReply({ content: 'Chỉ host hiện tại hoặc admin mới dùng được bảng này.' });
+      return;
+    }
+    if (action !== 'delete' && room.mode !== 'editable') {
+      await interaction.editReply({ content: 'Creator của phòng này được đặt ở chế độ không chỉnh sửa.' });
+      return;
+    }
     if (action === 'lock') {
       const everyone = interaction.guild.roles.everyone;
       const locked = channel.permissionOverwrites.cache.get(everyone.id)?.deny.has(PermissionFlagsBits.Connect);
       await channel.permissionOverwrites.edit(everyone, { Connect: locked ? null : false });
       await channel.permissionOverwrites.edit(room.ownerId, { Connect: true, ViewChannel: true });
-      await interaction.reply({ content: locked ? '🔓 Đã mở khóa phòng.' : '🔒 Đã khóa phòng với người ngoài.', ephemeral: true });
+      await interaction.editReply({ content: locked ? '🔓 Đã mở khóa phòng.' : '🔒 Đã khóa phòng với người ngoài.' });
       return;
     }
     if (action === 'hide') {
@@ -758,64 +764,65 @@ export class SgfBot {
       const hidden = channel.permissionOverwrites.cache.get(everyone.id)?.deny.has(PermissionFlagsBits.ViewChannel);
       await channel.permissionOverwrites.edit(everyone, { ViewChannel: hidden ? null : false });
       await channel.permissionOverwrites.edit(room.ownerId, { ViewChannel: true, Connect: true });
-      await interaction.reply({ content: hidden ? '👁️ Đã hiện phòng.' : '🙈 Đã ẩn phòng khỏi thành viên khác.', ephemeral: true });
+      await interaction.editReply({ content: hidden ? '👁️ Đã hiện phòng.' : '🙈 Đã ẩn phòng khỏi thành viên khác.' });
       return;
     }
     if (action === 'notify') {
       const updated = (await store.updateRoom(channelId, { notifyJoinLeave: !room.notifyJoinLeave }))!;
       await this.refreshRoomPanel(updated);
-      await interaction.reply({ content: `🔔 Thông báo người ra/vào đã **${updated.notifyJoinLeave ? 'bật' : 'tắt'}**.`, ephemeral: true });
+      await interaction.editReply({ content: `🔔 Thông báo người ra/vào đã **${updated.notifyJoinLeave ? 'bật' : 'tắt'}**.` });
       return;
     }
     if (action === 'delete') {
       await store.deleteRoomByChannel(channelId);
       await channel.delete('Host/admin xóa phòng tạm').catch(() => undefined);
-      await interaction.reply({ content: '🗑️ Đã xóa phòng.', ephemeral: true });
+      await interaction.editReply({ content: '🗑️ Đã xóa phòng.' });
     }
   }
 
   private async onUserSelect(interaction: UserSelectMenuInteraction): Promise<void> {
     const [namespace, action, channelId] = interaction.customId.split(':');
     if (namespace !== 'roomuser' || !interaction.guild) return;
+    await interaction.deferReply({ ephemeral: true });
     const room = await store.getRoomByChannel(channelId);
     if (!room || (interaction.user.id !== room.ownerId && !isAdmin(interaction))) {
-      await interaction.reply({ content: 'Bạn không còn quyền điều khiển phòng này.', ephemeral: true });
+      await interaction.editReply({ content: 'Bạn không còn quyền điều khiển phòng này.' });
       return;
     }
     const targetId = interaction.values[0];
     const target = await interaction.guild.members.fetch(targetId).catch(() => null);
     const channel = interaction.guild.channels.cache.get(channelId);
     if (!target || !channel?.isVoiceBased()) {
-      await interaction.reply({ content: 'Không tìm thấy member hoặc phòng.', ephemeral: true });
+      await interaction.editReply({ content: 'Không tìm thấy member hoặc phòng.' });
       return;
     }
     if (action === 'invite') {
       await store.grantRoomAccess(room.id, target.id);
       await channel.permissionOverwrites.edit(target.id, { ViewChannel: true, Connect: true });
-      await interaction.reply({ content: `✅ Đã mời <@${target.id}> vào phòng.`, ephemeral: true });
+      await interaction.editReply({ content: `✅ Đã mời <@${target.id}> vào phòng.` });
       return;
     }
     if (target.voice.channelId !== channelId) {
-      await interaction.reply({ content: 'Member được chọn hiện không ở trong phòng.', ephemeral: true });
+      await interaction.editReply({ content: 'Member được chọn hiện không ở trong phòng.' });
       return;
     }
     if (target.id === room.ownerId) {
-      await interaction.reply({ content: 'Không thể kick hoặc chuyển host cho chính host hiện tại.', ephemeral: true });
+      await interaction.editReply({ content: 'Không thể kick hoặc chuyển host cho chính host hiện tại.' });
       return;
     }
     if (action === 'kick') {
       await store.revokeRoomAccess(room.id, target.id);
       await channel.permissionOverwrites.delete(target.id, 'Thu hồi quyền khi bị kick').catch(() => undefined);
       await target.voice.disconnect(`Bị kick khỏi phòng bởi ${interaction.user.tag}`);
-      await interaction.reply({ content: `👢 Đã kick <@${target.id}> và thu hồi quyền mời/password.`, ephemeral: true });
+      await interaction.editReply({ content: `👢 Đã kick <@${target.id}> và thu hồi quyền mời/password.` });
       return;
     }
     if (action === 'transfer') {
       try {
         await this.transferOwnership(room, target, `Chuyển bởi <@${interaction.user.id}>.`);
-        await interaction.reply({ content: `👑 Đã chuyển host cho <@${target.id}>.`, ephemeral: true });
+        await interaction.editReply({ content: `👑 Đã chuyển host cho <@${target.id}>.` });
       } catch (error) {
-        await interaction.reply({ content: error instanceof Error ? error.message : 'Không chuyển được host.', ephemeral: true });
+        await interaction.editReply({ content: error instanceof Error ? error.message : 'Không chuyển được host.' });
       }
     }
   }
@@ -824,13 +831,14 @@ export class SgfBot {
     const [namespace, action, channelId] = interaction.customId.split(':');
     if (namespace === 'payment') return this.onDonationModal(interaction);
     if (namespace === 'roompassmodal' && action === 'verify') {
+      await interaction.deferReply({ ephemeral: Boolean(interaction.guild) });
       const room = await store.getRoomByChannel(channelId);
       const attemptKey = `${channelId}:${interaction.user.id}`;
       const redisAttemptKey = `password-attempt:${attemptKey}`;
       const memoryAttempt = this.passwordAttempts.get(attemptKey);
       const attemptCount = cache.backend === 'memory' ? memoryAttempt?.count || 0 : Number(await cache.get(redisAttemptKey) || 0);
       if (attemptCount >= 5) {
-        await interaction.reply({ content: '⏳ Bạn đã nhập sai quá nhiều lần. Hãy thử lại sau 5 phút.' });
+        await interaction.editReply({ content: '⏳ Bạn đã nhập sai quá nhiều lần. Hãy thử lại sau 5 phút.' });
         return;
       }
       const password = interaction.fields.getTextInputValue('password');
@@ -839,41 +847,42 @@ export class SgfBot {
           ? attemptCount + 1
           : await cache.increment(redisAttemptKey, 5 * 60);
         if (cache.backend === 'memory') this.passwordAttempts.set(attemptKey, { count: nextCount, resetAt: Date.now() + 5 * 60_000 });
-        await interaction.reply({ content: `❌ Mật khẩu không đúng hoặc phòng đã bị xóa. Còn ${Math.max(0, 5 - nextCount)} lần thử trước khi tạm khóa.` });
+        await interaction.editReply({ content: `❌ Mật khẩu không đúng hoặc phòng đã bị xóa. Còn ${Math.max(0, 5 - nextCount)} lần thử trước khi tạm khóa.` });
         return;
       }
       this.passwordAttempts.delete(attemptKey);
       if (cache.backend !== 'memory') await cache.del(redisAttemptKey);
       await store.grantRoomAccess(room.id, interaction.user.id);
-      await interaction.reply({ content: `✅ Đúng mật khẩu. Bạn có thể vào lại phòng <#${room.channelId}>.` });
+      await interaction.editReply({ content: `✅ Đúng mật khẩu. Bạn có thể vào lại phòng <#${room.channelId}>.` });
       return;
     }
     if (namespace !== 'roommodal' || !interaction.guild) return;
+    await interaction.deferReply({ ephemeral: true });
     const room = await store.getRoomByChannel(channelId);
     const channel = interaction.guild.channels.cache.get(channelId);
     if (!room || !channel?.isVoiceBased()) {
-      await interaction.reply({ content: 'Phòng không còn tồn tại.', ephemeral: true });
+      await interaction.editReply({ content: 'Phòng không còn tồn tại.' });
       return;
     }
     if (interaction.user.id !== room.ownerId && !isAdmin(interaction)) {
-      await interaction.reply({ content: 'Chỉ host hoặc admin mới thao tác được.', ephemeral: true });
+      await interaction.editReply({ content: 'Chỉ host hoặc admin mới thao tác được.' });
       return;
     }
     if (action === 'rename') {
       const name = interaction.fields.getTextInputValue('name').trim().slice(0, 100);
       await channel.setName(name, 'Đổi tên bởi host');
-      await interaction.reply({ content: `✏️ Đã đổi tên thành **${name}**.`, ephemeral: true });
+      await interaction.editReply({ content: `✏️ Đã đổi tên thành **${name}**.` });
       return;
     }
     if (action === 'limit') {
       const raw = Number(interaction.fields.getTextInputValue('limit'));
       const limit = Number.isFinite(raw) ? Math.min(99, Math.max(0, Math.round(raw))) : -1;
       if (limit < 0) {
-        await interaction.reply({ content: 'Nhập số từ 0 đến 99.', ephemeral: true });
+        await interaction.editReply({ content: 'Nhập số từ 0 đến 99.' });
         return;
       }
       await channel.setUserLimit(limit, 'Đổi giới hạn bởi host');
-      await interaction.reply({ content: `👥 Đã đặt giới hạn: **${limit === 0 ? 'Không giới hạn' : limit}**.`, ephemeral: true });
+      await interaction.editReply({ content: `👥 Đã đặt giới hạn: **${limit === 0 ? 'Không giới hạn' : limit}**.` });
       return;
     }
     if (action === 'password') {
@@ -885,7 +894,7 @@ export class SgfBot {
         passwordHash: password ? passwordDigest(password, salt) : '',
       }))!;
       await this.refreshRoomPanel(updated);
-      await interaction.reply({ content: password ? '🔐 Đã bật/đổi mật khẩu phòng.' : '🔓 Đã tắt mật khẩu phòng.', ephemeral: true });
+      await interaction.editReply({ content: password ? '🔐 Đã bật/đổi mật khẩu phòng.' : '🔓 Đã tắt mật khẩu phòng.' });
     }
   }
 
@@ -902,33 +911,35 @@ export class SgfBot {
     if (!interaction.guild) return;
     if (action === 'donate') return interaction.showModal(this.donationModal());
     if (action !== 'buy' || !productId) return;
+    await interaction.deferReply({ ephemeral: true });
     try {
       const result = await createProductPayment({ guildId: interaction.guild.id, userId: interaction.user.id, userTag: interaction.user.tag, productId });
-      await interaction.reply({ ephemeral: true, ...this.paymentMessage(result) });
+      await interaction.editReply(this.paymentMessage(result));
     } catch (error) {
-      await interaction.reply({ content: error instanceof Error ? error.message : 'Không tạo được đơn thanh toán.', ephemeral: true });
+      await interaction.editReply({ content: error instanceof Error ? error.message : 'Không tạo được đơn thanh toán.', embeds: [], components: [] });
     }
   }
 
   private async onDonationModal(interaction: ModalSubmitInteraction): Promise<void> {
     if (!interaction.guild) return;
+    await interaction.deferReply({ ephemeral: true });
     const amount = Number(interaction.fields.getTextInputValue('amount').replace(/[^0-9]/g, ''));
     const note = interaction.fields.getTextInputValue('note').trim();
     try {
       const result = await createDonationPayment({ guildId: interaction.guild.id, userId: interaction.user.id, userTag: interaction.user.tag, amountVnd: amount, note });
-      await interaction.reply({ ephemeral: true, ...this.paymentMessage(result) });
+      await interaction.editReply(this.paymentMessage(result));
     } catch (error) {
-      await interaction.reply({ content: error instanceof Error ? error.message : 'Không tạo được đơn donate.', ephemeral: true });
+      await interaction.editReply({ content: error instanceof Error ? error.message : 'Không tạo được đơn donate.', embeds: [], components: [] });
     }
   }
 
   private paymentMessage(result: PaymentCreationResult): { content: string; embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } {
-    const { payment, product, qrDynamic, bankCode, accountNumber, accountName } = result;
+    const { payment, product, qrDynamic, bankCode, bankName, accountNumber, accountName } = result;
     const lines = [
       `**${product?.name || 'Donate cho SGF'}**`,
       `Số tiền: **${formatVnd(payment.expectedAmountVnd)}**`,
       `Nội dung chuyển khoản: **${payment.orderCode}**`,
-      bankCode ? `Ngân hàng: **${bankCode}**` : '',
+      bankCode ? `Ngân hàng: **${bankName || bankCode}${bankName && bankName !== bankCode ? ` (${bankCode})` : ''}**` : '',
       accountNumber ? `STK: **${accountNumber}**` : '',
       accountName ? `Tên TK: **${accountName}**` : '',
       qrDynamic ? 'QR đã điền sẵn số tiền + mã đơn.' : 'QR tĩnh: hãy tự nhập đúng số tiền và nội dung chuyển khoản.',

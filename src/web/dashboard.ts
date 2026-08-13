@@ -1,6 +1,6 @@
 // TypeScript source for the browser dashboard. Build output: public/dashboard.js.
 // @ts-nocheck
-const state = { guilds: [], guildId: '', detail: null, runtime: null, isDeveloper: false, developerSystem: null, developerSystemLoadedAt: 0, developerSystemLoading: false, editingProduct: null, members: [], membersLoadedAt: 0, membersLoading: false, membersRetryAt: 0, memberPage: 1, liveRooms: [], liveRoomsLoadedAt: 0, liveRoomsLoading: false, passwordRoomId: '' };
+const state = { guilds: [], guildId: '', detail: null, runtime: null, isDeveloper: false, developerSystem: null, developerSystemLoadedAt: 0, developerSystemLoading: false, sepayAccounts: [], sepayAccountsLoadedAt: 0, sepayAccountsLoading: false, editingProduct: null, members: [], membersLoadedAt: 0, membersLoading: false, membersRetryAt: 0, memberPage: 1, liveRooms: [], liveRoomsLoadedAt: 0, liveRoomsLoading: false, passwordRoomId: '' };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const vnd = (value) => `${new Intl.NumberFormat('vi-VN').format(Number(value || 0))} ₫`;
@@ -142,6 +142,7 @@ function setPage(page) {
   if (page === 'members' && admin) loadMembers();
   if (page === 'rooms') loadLiveRooms();
   if (page === 'system' && developer) loadDeveloperSystem();
+  if (page === 'integration' && developer) loadSepayAccounts();
 }
 
 async function selectGuild(guildId) {
@@ -153,6 +154,8 @@ async function selectGuild(guildId) {
   state.memberPage = 1;
   state.liveRooms = [];
   state.liveRoomsLoadedAt = 0;
+  state.sepayAccounts = [];
+  state.sepayAccountsLoadedAt = 0;
   state.liveRoomsLoading = false;
   const guild = state.guilds.find((item) => item.id === guildId);
   $('#serverPickerView').classList.add('hidden');
@@ -206,7 +209,7 @@ function renderDetail() {
   $('#statRooms').textContent = stats.activeRooms;
   $('#statPending').textContent = stats.pendingCount;
   $('#todayLabel').textContent = new Intl.DateTimeFormat('vi-VN', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date());
-  $('#sepayMiniStatus').textContent = sepay.webhookConfigured && sepay.apiTokenConfigured ? 'Webhook + API v2 sẵn sàng' : sepay.webhookConfigured ? 'Webhook đã cấu hình' : sepay.apiTokenConfigured ? 'API v2 đối soát đã cấu hình' : 'Cần cấu hình SePay';
+  $('#sepayMiniStatus').textContent = sepay.apiConfigured ? 'SePay API key đã cấu hình' : 'Cần cấu hình SEPAY_API_KEY';
   fillSettings(settings);
   renderCreators(settings.creatorChannels);
   renderProducts(products);
@@ -245,7 +248,7 @@ function renderDeveloperSystem() {
 }
 
 function renderSetupProgress(settings, products, sepay) {
-  const completed = [settings.creatorChannels.length > 0, products.length > 0, Boolean(sepay.dynamicQrConfigured || sepay.staticQrConfigured), Boolean(sepay.webhookConfigured || sepay.apiTokenConfigured)];
+  const completed = [settings.creatorChannels.length > 0, products.length > 0, Boolean(sepay.dynamicQrConfigured || sepay.staticQrConfigured), Boolean(sepay.apiConfigured && sepay.webhookConfigured)];
   const count = completed.filter(Boolean).length;
   $('#setupProgressText').textContent = `${count}/4`;
   $('#setupProgressBar').style.width = `${count * 25}%`;
@@ -257,11 +260,8 @@ function fillSettings(settings) {
   $('#controlChannelId').value = settings.controlChannelId || '';
   $('#paymentPanelChannelId').value = settings.paymentPanelChannelId || '';
   $('#premiumRoleId').value = settings.premiumRoleId || '';
-  $('#bankCode').value = settings.bankCode || '';
-  $('#bankAccountNumber').value = settings.bankAccountNumber || '';
-  $('#bankAccountName').value = settings.bankAccountName || '';
+  $('#sepayBankAccountId').value = settings.sepayBankAccountId || '';
   $('#donationMinVnd').value = settings.donationMinVnd || 1000;
-  $('#staticQrUrl').value = settings.staticQrUrl || '';
 }
 
 function renderCreators(rows = []) {
@@ -293,7 +293,7 @@ function readCreators() {
 
 async function saveVoiceSettings() {
   try {
-    const body = { creatorChannels: readCreators(), premiumRoleId: $('#premiumRoleId').value.trim(), controlChannelId: $('#controlChannelId').value.trim(), paymentPanelChannelId: $('#paymentPanelChannelId').value.trim(), defaultRoomCategoryId: $('#defaultRoomCategoryId').value.trim(), roomNameTemplate: $('#roomNameTemplate').value.trim(), donationMinVnd: state.detail.settings.donationMinVnd, bankCode: state.detail.settings.bankCode, bankAccountNumber: state.detail.settings.bankAccountNumber, bankAccountName: state.detail.settings.bankAccountName, staticQrUrl: state.detail.settings.staticQrUrl };
+    const body = { creatorChannels: readCreators(), premiumRoleId: $('#premiumRoleId').value.trim(), controlChannelId: $('#controlChannelId').value.trim(), paymentPanelChannelId: $('#paymentPanelChannelId').value.trim(), defaultRoomCategoryId: $('#defaultRoomCategoryId').value.trim(), roomNameTemplate: $('#roomNameTemplate').value.trim(), donationMinVnd: state.detail.settings.donationMinVnd, sepayBankAccountId: state.detail.settings.sepayBankAccountId, bankCode: state.detail.settings.bankCode, bankAccountNumber: state.detail.settings.bankAccountNumber, bankAccountName: state.detail.settings.bankAccountName, staticQrUrl: state.detail.settings.staticQrUrl };
     const result = await api(`/api/guilds/${state.guildId}/settings`, { method: 'PUT', body: JSON.stringify(body) });
     state.detail.settings = result.settings;
     renderCreators(result.settings.creatorChannels);
@@ -643,35 +643,41 @@ function renderIntegration(sepay, integration) {
   $('#sepayWebhookUrl').value = sepay.webhookUrl;
   $('#paymentsEndpoint').value = integration.paymentsEndpoint;
   $('#entitlementsEndpoint').value = integration.entitlementsEndpoint;
-  $('#sepayStatus').innerHTML = sepay.webhookConfigured ? '<i class="fa-solid fa-circle-check"></i> Webhook sẵn sàng' : '<i class="fa-solid fa-triangle-exclamation"></i> Thiếu webhook API key';
-  $('#sepayApiStatus').innerHTML = sepay.apiTokenConfigured ? '<i class="fa-solid fa-key"></i> API token đã cấu hình' : '<i class="fa-solid fa-triangle-exclamation"></i> Thiếu API token v2';
-  $('#sepayApiMessage').textContent = sepay.apiTokenConfigured ? `Sẵn sàng đối soát qua ${sepay.apiBaseUrl}.` : 'Thêm SEPAY_API_TOKEN vào .env rồi restart service.';
+  $('#sepayStatus').innerHTML = sepay.apiConfigured ? '<i class="fa-solid fa-circle-check"></i> SePay API key đã cấu hình' : '<i class="fa-solid fa-triangle-exclamation"></i> Thiếu SEPAY_API_KEY';
   $('#integrationCode').textContent = `const response = await fetch('${integration.paymentsEndpoint}?guildId=${state.guildId}', {\n  headers: { 'X-SGF-Secret': process.env.SGF_BOT_API_SECRET }\n});\nconst { data: payments } = await response.json();\n\nGET ${integration.entitlementsEndpoint}?guildId=${state.guildId}&discordUserId=DISCORD_ID`;
 }
 
-async function checkSepayApi() {
-  const button = $('#checkSepayApiButton');
-  button.disabled = true;
-  $('#sepayApiMessage').textContent = 'Đang kết nối SePay API v2…';
+async function loadSepayAccounts(force = false) {
+  if (!state.isDeveloper || !state.guildId || state.sepayAccountsLoading) return;
+  if (!force && state.sepayAccounts.length && Date.now() - state.sepayAccountsLoadedAt < 10 * 60_000) return renderSepayAccounts();
+  state.sepayAccountsLoading = true;
+  $('#sepayAccountsMessage').textContent = 'Đang lấy tài khoản ngân hàng từ SePay...';
   try {
-    const result = await api(`/api/guilds/${state.guildId}/sepay-status?refresh=1`);
-    const status = result.status || {};
-    $('#sepayApiStatus').innerHTML = status.reachable ? '<i class="fa-solid fa-circle-check"></i> API v2 kết nối tốt' : '<i class="fa-solid fa-triangle-exclamation"></i> API v2 chưa sẵn sàng';
-    $('#sepayApiMessage').textContent = status.reachable
-      ? `Đã xác thực ${status.accounts?.length || 0} tài khoản ngân hàng: ${(status.accounts || []).map((account) => `${account.bankCode} - ${account.accountNumber}`).join(', ') || 'không có tài khoản active'}.`
-      : (status.error || 'Không kết nối được SePay API.');
-    toast(status.reachable ? 'Kết nối SePay API v2 thành công.' : 'SePay API chưa sẵn sàng.', status.reachable ? 'good' : 'bad');
-  } catch (error) { $('#sepayApiMessage').textContent = error.message; toast(error.message, 'bad'); }
-  finally { button.disabled = false; }
+    const result = await api(`/api/guilds/${state.guildId}/sepay-accounts${force ? '?refresh=1' : ''}`);
+    state.sepayAccounts = result.accounts || [];
+    state.sepayAccountsLoadedAt = Date.now();
+    renderSepayAccounts(result.selectedBankAccountId);
+    $('#sepayAccountsMessage').textContent = `Đã tải ${state.sepayAccounts.length} tài khoản active từ SePay.`;
+  } catch (error) {
+    $('#sepayAccountsMessage').textContent = error.message;
+    toast(error.message, 'bad');
+  } finally { state.sepayAccountsLoading = false; }
+}
+
+function renderSepayAccounts(selectedId = state.detail?.settings?.sepayBankAccountId || '') {
+  const select = $('#sepayBankAccountId');
+  select.innerHTML = state.sepayAccounts.map((account) => `<option value="${esc(account.id)}">${esc(account.bankCode)} - ${esc(account.accountNumber)} - ${esc(account.accountName || account.label)}</option>`).join('');
+  if (selectedId && state.sepayAccounts.some((account) => account.id === selectedId)) select.value = selectedId;
+  else if (state.sepayAccounts[0]) select.value = state.sepayAccounts[0].id;
 }
 
 async function savePaymentSettings() {
   try {
-    const result = await api(`/api/guilds/${state.guildId}/settings`, { method: 'PUT', body: JSON.stringify({ bankCode: $('#bankCode').value.trim(), bankAccountNumber: $('#bankAccountNumber').value.trim(), bankAccountName: $('#bankAccountName').value.trim(), donationMinVnd: Number($('#donationMinVnd').value.replace(/[^0-9]/g, '') || 1000), staticQrUrl: $('#staticQrUrl').value.trim() }) });
+    const result = await api(`/api/guilds/${state.guildId}/settings`, { method: 'PUT', body: JSON.stringify({ sepayBankAccountId: $('#sepayBankAccountId').value, donationMinVnd: Number($('#donationMinVnd').value.replace(/[^0-9]/g, '') || 1000) }) });
     state.detail.settings = result.settings;
     fillSettings(result.settings);
     renderSetupProgress(result.settings, state.detail.products, state.detail.sepay);
-    toast('Đã lưu thông tin nhận tiền.');
+    toast('Đã lưu tài khoản SePay nhận tiền.');
   } catch (error) { toast(error.message, 'bad'); }
 }
 
@@ -716,13 +722,13 @@ async function init() {
   $('#cancelRoomPassword').addEventListener('click', closeRoomPasswordDialog);
   $('#roomPasswordDialog').addEventListener('click', (event) => { if (event.target.id === 'roomPasswordDialog') closeRoomPasswordDialog(); });
   $('#savePaymentSettingsButton').addEventListener('click', savePaymentSettings);
+  $('#refreshSepayAccountsButton').addEventListener('click', () => loadSepayAccounts(true));
   $('#storeDonateButton').addEventListener('click', donateFromStore);
   $('#refreshMembersButton').addEventListener('click', () => loadMembers(true));
   $('#memberSearch').addEventListener('input', () => { state.memberPage = 1; renderMembers(); });
   $('#memberPrevPage').addEventListener('click', () => { state.memberPage -= 1; renderMembers(); });
   $('#memberNextPage').addEventListener('click', () => { state.memberPage += 1; renderMembers(); });
   $('#copyIntegrationButton').addEventListener('click', () => { navigator.clipboard?.writeText($('#integrationCode').textContent); toast('Đã copy API snippet.'); });
-  $('#checkSepayApiButton').addEventListener('click', checkSepayApi);
 
   try {
     const runtime = await api('/api/runtime');

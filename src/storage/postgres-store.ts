@@ -39,6 +39,7 @@ function rowToSettings(row: Record<string, unknown>, creatorChannels: CreatorCha
     defaultRoomCategoryId: String(row.default_room_category_id || ''),
     roomNameTemplate: String(row.room_name_template || "{user}'s room"),
     donationMinVnd: Number(row.donation_min_vnd || 1000),
+    sepayBankAccountId: String(row.sepay_bank_account_id || ''),
     bankCode: String(row.bank_code || ''),
     bankAccountNumber: String(row.bank_account_number || ''),
     bankAccountName: String(row.bank_account_name || ''),
@@ -120,17 +121,17 @@ export const postgresStore = {
       await tx`
         insert into public.guild_settings (
           guild_id, guild_name, premium_role_id, control_channel_id, payment_panel_channel_id,
-          default_room_category_id, room_name_template, donation_min_vnd, bank_code,
+          default_room_category_id, room_name_template, donation_min_vnd, sepay_bank_account_id, bank_code,
           bank_account_number, bank_account_name, static_qr_url, updated_at
         ) values (
           ${guildId}, ${next.guildName}, ${next.premiumRoleId}, ${next.controlChannelId}, ${next.paymentPanelChannelId},
-          ${next.defaultRoomCategoryId}, ${next.roomNameTemplate}, ${next.donationMinVnd}, ${next.bankCode},
+          ${next.defaultRoomCategoryId}, ${next.roomNameTemplate}, ${next.donationMinVnd}, ${next.sepayBankAccountId}, ${next.bankCode},
           ${next.bankAccountNumber}, ${next.bankAccountName}, ${next.staticQrUrl}, now()
         ) on conflict (guild_id) do update set
           guild_name = excluded.guild_name, premium_role_id = excluded.premium_role_id,
           control_channel_id = excluded.control_channel_id, payment_panel_channel_id = excluded.payment_panel_channel_id,
           default_room_category_id = excluded.default_room_category_id, room_name_template = excluded.room_name_template,
-          donation_min_vnd = excluded.donation_min_vnd, bank_code = excluded.bank_code,
+          donation_min_vnd = excluded.donation_min_vnd, sepay_bank_account_id = excluded.sepay_bank_account_id, bank_code = excluded.bank_code,
           bank_account_number = excluded.bank_account_number, bank_account_name = excluded.bank_account_name,
           static_qr_url = excluded.static_qr_url, updated_at = now()
       `;

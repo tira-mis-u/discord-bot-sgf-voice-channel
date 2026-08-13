@@ -7,9 +7,9 @@ export function createOrderCode(type: 'product' | 'donation'): string {
   return randomOrderCode(type === 'donation' ? 'DON' : 'BUY');
 }
 
-export function buildPaymentQr(settings: GuildSettings, amount: number, orderCode: string): { url: string; dynamic: boolean } {
-  const bankCode = settings.bankCode || config.sepay.bankCode;
-  const accountNumber = settings.bankAccountNumber || config.sepay.accountNumber;
+export function buildPaymentQr(settings: GuildSettings, amount: number, orderCode: string, account?: { bankCode: string; accountNumber: string }): { url: string; dynamic: boolean } {
+  const bankCode = account?.bankCode || settings.bankCode || config.sepay.bankCode;
+  const accountNumber = account?.accountNumber || settings.bankAccountNumber || config.sepay.accountNumber;
   // A per-guild static QR is an explicit override. Otherwise prefer dynamic QR whenever bank + account are configured, and use the global static QR only as fallback.
   if (settings.staticQrUrl) return { url: settings.staticQrUrl, dynamic: false };
   if (!bankCode || !accountNumber) {

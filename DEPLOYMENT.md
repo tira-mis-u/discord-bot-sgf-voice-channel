@@ -106,17 +106,15 @@ Trong Discord Developer Portal, thêm đúng redirect URI HTTPS đó.
 
 ## SePay production setup
 
-1. Mở Dashboard → tab **Tích hợp SGF** copy webhook URL.
-2. Vào SePay → Webhooks → tạo webhook mới.
-3. Chọn bank account dùng để nhận tiền.
-4. Chọn `In_only`, JSON request, API key auth.
-5. Paste webhook API key vào `SEPAY_WEBHOOK_API_KEY` trong `.env`.
-6. Vào Company Settings → API Access, tạo API v2 token rồi lưu vào `SEPAY_API_TOKEN`.
-7. Dùng `SEPAY_API_BASE_URL=https://userapi.sepay.vn/v2` cho production hoặc `https://userapi-sandbox.sepay.vn/v2` cho test mode.
-8. Restart service, vào Dashboard → **Tích hợp & nhận tiền** → **Kiểm tra API v2**.
-9. Dùng payment panel tạo một đơn nhỏ; chuyển đúng mã; kiểm tra webhook/API reconciliation + role + ledger.
+1. Điền API key vào `SEPAY_API_KEY` rồi restart service.
+2. Vào Dashboard developer → **Tích hợp hệ thống** → tải danh sách tài khoản SePay và chọn tài khoản nhận tiền.
+3. Copy webhook URL từ Dashboard.
+4. Vào SePay → Webhooks → tạo webhook mới.
+5. Chọn `In_only`, JSON request và API Key authentication.
+6. Dùng cùng `SEPAY_API_KEY` cho webhook, hoặc đặt key riêng trong `SEPAY_WEBHOOK_API_KEY`.
+7. Tạo một đơn nhỏ, chuyển đúng mã rồi kiểm tra role và payment ledger.
 
-Webhook endpoint phải public HTTPS và trả HTTP 2xx nhanh. Webhook xử lý realtime; SePay API v2 dùng Bearer token để đối soát đơn pending khi webhook chậm. Code chống transaction trùng và lưu unmatched transaction để debug. Không expose API token cho frontend.
+Webhook endpoint phải public HTTPS và trả HTTP 2xx nhanh. Bank code, số tài khoản và tên chủ tài khoản được backend lấy tự động từ SePay API. Code chống transaction trùng và lưu unmatched transaction để debug.
 
 ## Dùng domain SGF chính
 

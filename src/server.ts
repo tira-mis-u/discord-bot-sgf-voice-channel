@@ -12,9 +12,9 @@ import { cache } from './cache.js';
 import { SgfBot } from './bot.js';
 import type { AuthSession, OAuthGuild, SessionUser } from './types.js';
 import { clampText, escapeHtml, isDiscordAdmin, parseVnd } from './utils.js';
-import { createDonationPayment, createProductPayment, reconcilePendingPayment } from './services/payment-service.js';
+import { createDonationPayment, createProductPayment } from './services/payment-service.js';
 import { verifySepayWebhook } from './services/sepay.js';
-import { getSepayApiStatus, isSepayApiConfigured } from './services/sepay-api.js';
+import { getSepayBankAccounts, resolveSepayBankAccount } from './services/sepay-api.js';
 import { sessionStore } from './services/session-store.js';
 
 const publicDir = path.resolve('public');
@@ -257,8 +257,8 @@ app.get('/api/runtime', (_req, res) => {
     ...bot.getRuntimeStatus(),
     publicUrl: config.publicUrl,
     sepayWebhookUrl: `${config.publicUrl}/api/payments/sepay/webhook`,
+    sepayApiConfigured: Boolean(config.sepay.apiKey),
     sepayWebhookConfigured: Boolean(config.sepay.webhookApiKey),
-    sepayApiConfigured: isSepayApiConfigured(),
     inviteUrl,
   });
 });
@@ -330,6 +330,7 @@ app.get('/api/guilds/:guildId', requireAuth, async (req: AuthRequest, res: Respo
   const visibleSettings = developer ? settings : {
     ...settings,
     paymentPanelChannelId: '',
+    sepayBankAccountId: '',
     bankCode: '',
     bankAccountNumber: '',
     bankAccountName: '',
@@ -346,7 +347,7 @@ app.get('/api/guilds/:guildId', requireAuth, async (req: AuthRequest, res: Respo
     products: await store.listProducts(guildId, !developer),
     stats,
     rooms,
-    sepay: developer ? { webhookConfigured: Boolean(config.sepay.webhookApiKey), apiTokenConfigured: isSepayApiConfigured(), apiBaseUrl: config.sepay.apiBaseUrl, dynamicQrConfigured: Boolean(settings.bankCode || config.sepay.bankCode) && Boolean(settings.bankAccountNumber || config.sepay.accountNumber), staticQrConfigured: Boolean(settings.staticQrUrl || config.sepay.staticQrUrl), webhookUrl: `${config.publicUrl}/api/payments/sepay/webhook` } : { webhookConfigured: false, apiTokenConfigured: false, apiBaseUrl: '', dynamicQrConfigured: false, staticQrConfigured: false, webhookUrl: '' },
+    sepay: developer ? { apiConfigured: Boolean(config.sepay.apiKey), webhookConfigured: Boolean(config.sepay.webhookApiKey), selectedBankAccountId: settings.sepayBankAccountId, dynamicQrConfigured: Boolean(config.sepay.apiKey) || (Boolean(settings.bankCode || config.sepay.bankCode) && Boolean(settings.bankAccountNumber || config.sepay.accountNumber)), staticQrConfigured: Boolean(settings.staticQrUrl || config.sepay.staticQrUrl), webhookUrl: `${config.publicUrl}/api/payments/sepay/webhook` } : { apiConfigured: false, webhookConfigured: false, selectedBankAccountId: '', dynamicQrConfigured: false, staticQrConfigured: false, webhookUrl: '' },
     integration: developer ? { paymentsEndpoint: `${config.publicUrl}/api/integrations/sgf/payments`, entitlementsEndpoint: `${config.publicUrl}/api/integrations/sgf/entitlements`, eventsConfigured: Boolean(config.sgf.eventsWebhookUrl) } : { paymentsEndpoint: '', entitlementsEndpoint: '', eventsConfigured: false },
   });
 });
@@ -372,6 +373,7 @@ const settingsInput = z.object({
   defaultRoomCategoryId: z.string().max(32).optional(),
   roomNameTemplate: z.string().max(100).optional(),
   donationMinVnd: z.number().int().min(1000).max(500000000).optional(),
+  sepayBankAccountId: z.string().max(100).optional(),
   bankCode: z.string().max(30).optional(),
   bankAccountNumber: z.string().max(40).optional(),
   bankAccountName: z.string().max(100).optional(),
@@ -505,11 +507,18 @@ app.delete('/api/guilds/:guildId/products/:productId', requireAuth, async (req: 
   res.json({ ok: true });
 });
 
-app.get('/api/guilds/:guildId/sepay-status', requireAuth, async (req: AuthRequest, res: Response) => {
-  const guildId = String(req.params.guildId);
+app.get('/api/guilds/:guildId/sepay-accounts', requireAuth, async (req: AuthRequest, res: Response) => {
   if (!requireDeveloper(req, res)) return;
-  const status = await getSepayApiStatus(String(req.query.refresh || '') === '1');
-  res.json({ status });
+  try {
+    const guildId = String(req.params.guildId);
+    const [accounts, settings] = await Promise.all([
+      getSepayBankAccounts(String(req.query.refresh || '') === '1'),
+      store.getSettings(guildId),
+    ]);
+    res.json({ accounts, selectedBankAccountId: settings.sepayBankAccountId });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Không đọc được tài khoản SePay.' });
+  }
 });
 
 app.get('/api/guilds/:guildId/payments', requireAuth, async (req: AuthRequest, res: Response) => {
@@ -642,7 +651,7 @@ app.post('/api/public/guilds/:guildId/donation', requireAuth, async (req: AuthRe
 });
 
 app.get('/api/public/payments/:paymentId', requireAuth, async (req: AuthRequest, res: Response) => {
-  let payment = await store.getPayment(String(req.params.paymentId));
+  const payment = await store.getPayment(String(req.params.paymentId));
   if (!payment) {
     res.status(404).json({ error: 'PAYMENT_NOT_FOUND' });
     return;
@@ -653,12 +662,9 @@ app.get('/api/public/payments/:paymentId', requireAuth, async (req: AuthRequest,
     res.status(403).json({ error: 'PAYMENT_FORBIDDEN' });
     return;
   }
-  const reconciliation = payment.status === 'pending'
-    ? await reconcilePendingPayment(bot.client, payment.id)
-    : { configured: isSepayApiConfigured(), checked: false, matched: payment.status === 'paid', message: '', checkedAt: '' };
-  payment = await store.getPayment(payment.id) || payment;
   const settings = await store.getSettings(payment.guildId);
-  res.json({ payment, reconciliation, product: payment.productId ? await store.getProduct(payment.productId) : undefined, paymentInfo: { bankCode: settings.bankCode || config.sepay.bankCode, accountNumber: settings.bankAccountNumber || config.sepay.accountNumber, accountName: settings.bankAccountName || config.sepay.accountName } });
+  const account = await resolveSepayBankAccount(settings);
+  res.json({ payment, product: payment.productId ? await store.getProduct(payment.productId) : undefined, paymentInfo: { bankCode: account.bankCode, bankName: account.bankName, accountNumber: account.accountNumber, accountName: account.accountName } });
 });
 
 app.post('/api/payments/sepay/webhook', async (req: Request, res: Response) => {
